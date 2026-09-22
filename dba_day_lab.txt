@@ -1,0 +1,569 @@
+USE master;
+GO
+
+IF DB_ID(N'DBA_Day2_Lab') IS NOT NULL
+BEGIN
+    ALTER DATABASE DBA_Day2_Lab SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE DBA_Day2_Lab;
+END
+GO
+
+CREATE DATABASE DBA_Day2_Lab
+ON PRIMARY
+(
+    NAME = N'DBA_Day2_Lab_Data',
+    FILENAME = N'C:\Users\PallaviPrasad\CT Data\sample_data\DBA_Day2_Lab_Data.mdf',
+    SIZE = 512MB,
+    FILEGROWTH = 256MB
+)
+LOG ON
+(
+    NAME = N'DBA_Day2_Lab_Log',
+    FILENAME = N'C:\Users\PallaviPrasad\CT Data\sample_data\DBA_Day2_Lab_Log.ldf',
+    SIZE = 256MB,
+    FILEGROWTH = 128MB
+);
+GO
+
+ALTER DATABASE DBA_Day2_Lab SET RECOVERY FULL;
+ALTER DATABASE DBA_Day2_Lab SET AUTO_CLOSE OFF;
+ALTER DATABASE DBA_Day2_Lab SET AUTO_SHRINK OFF;
+ALTER DATABASE DBA_Day2_Lab SET READ_COMMITTED_SNAPSHOT OFF;
+GO
+
+USE DBA_Day2_Lab;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'Sales')
+    EXEC(N'CREATE SCHEMA Sales AUTHORIZATION dbo');
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'HR')
+    EXEC(N'CREATE SCHEMA HR AUTHORIZATION dbo');
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'SecurityLab')
+    EXEC(N'CREATE SCHEMA SecurityLab AUTHORIZATION dbo');
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'Monitoring')
+    EXEC(N'CREATE SCHEMA Monitoring AUTHORIZATION dbo');
+GO
+
+/* ---------------------------------------------------------------------------
+   Reference tables
+--------------------------------------------------------------------------- */
+
+CREATE TABLE HR.Department
+(
+    DepartmentID int IDENTITY(1,1) NOT NULL
+        CONSTRAINT PK_Department PRIMARY KEY,
+    DepartmentName varchar(100) NOT NULL,
+    RegionCode varchar(10) NOT NULL,
+    ManagerName varchar(150) NULL
+);
+GO
+
+INSERT HR.Department(DepartmentName, RegionCode, ManagerName)
+VALUES
+('Sales','IN-S','Sales Manager South'),
+('Sales','IN-N','Sales Manager North'),
+('Sales','IN-W','Sales Manager West'),
+('Sales','IN-E','Sales Manager East'),
+('Finance','IN-S','Finance Manager South'),
+('Operations','IN-S','Operations Manager South'),
+('IT','IN-S','IT Manager South'),
+('Support','IN-N','Support Manager North'),
+('Marketing','IN-W','Marketing Manager West'),
+('HR','IN-E','HR Manager East');
+GO
+
+CREATE TABLE HR.Employee
+(
+    EmployeeID int IDENTITY(1,1) NOT NULL
+        CONSTRAINT PK_Employee PRIMARY KEY,
+    EmployeeCode varchar(20) NOT NULL
+        CONSTRAINT UQ_Employee_Code UNIQUE,
+    FullName varchar(150) NOT NULL,
+    Email varchar(200) NOT NULL,
+    DepartmentID int NOT NULL,
+    RegionCode varchar(10) NOT NULL,
+    Salary decimal(12,2) NOT NULL,
+    HireDate date NOT NULL,
+    IsActive bit NOT NULL CONSTRAINT DF_Employee_IsActive DEFAULT 1,
+    CONSTRAINT FK_Employee_Department
+        FOREIGN KEY (DepartmentID) REFERENCES HR.Department(DepartmentID)
+);
+GO
+
+;WITH N AS
+(
+    SELECT TOP (2000)
+           ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM sys.all_objects a
+    CROSS JOIN sys.all_objects b
+)
+INSERT HR.Employee
+(
+    EmployeeCode, FullName, Email, DepartmentID,
+    RegionCode, Salary, HireDate, IsActive
+)
+SELECT
+    CONCAT('EMP', RIGHT('000000' + CAST(n AS varchar(6)), 6)),
+    CONCAT('Employee ', n),
+    CONCAT('employee', n, '@training.local'),
+    ((n - 1) % 10) + 1,
+    CASE ((n - 1) % 4)
+        WHEN 0 THEN 'IN-S'
+        WHEN 1 THEN 'IN-N'
+        WHEN 2 THEN 'IN-W'
+        ELSE 'IN-E'
+    END,
+    CAST(35000 + ((n * 137) % 115000) AS decimal(12,2)),
+    DATEADD(day, -((n * 17) % 5000), CAST(GETDATE() AS date)),
+    CASE WHEN n % 23 = 0 THEN 0 ELSE 1 END
+FROM N;
+GO
+
+CREATE TABLE Sales.Customer
+(
+    CustomerID int IDENTITY(1,1) NOT NULL
+        CONSTRAINT PK_Customer PRIMARY KEY,
+    CustomerNumber varchar(30) NOT NULL
+        CONSTRAINT UQ_Customer_Number UNIQUE,
+    CustomerName varchar(150) NOT NULL,
+    Email varchar(200) NOT NULL,
+    Phone varchar(30) NULL,
+    RegionCode varchar(10) NOT NULL,
+    City varchar(100) NOT NULL,
+    CustomerType varchar(30) NOT NULL,
+    CreditLimit decimal(14,2) NOT NULL,
+    CreatedDate datetime2(0) NOT NULL,
+    IsActive bit NOT NULL CONSTRAINT DF_Customer_IsActive DEFAULT 1
+);
+GO
+
+;WITH N AS
+(
+    SELECT TOP (250000)
+           ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM sys.all_objects a
+    CROSS JOIN sys.all_objects b
+    CROSS JOIN (VALUES(1),(2)) x(v)
+)
+INSERT Sales.Customer
+(
+    CustomerNumber, CustomerName, Email, Phone,
+    RegionCode, City, CustomerType, CreditLimit, CreatedDate, IsActive
+)
+SELECT
+    CONCAT('CUST', RIGHT('0000000' + CAST(n AS varchar(7)), 7)),
+    CONCAT('Customer ', n),
+    CONCAT('customer', n, '@training.local'),
+    CONCAT('+91-90000-', RIGHT('00000' + CAST(n % 100000 AS varchar(5)), 5)),
+    CASE n % 4 WHEN 0 THEN 'IN-S' WHEN 1 THEN 'IN-N'
+               WHEN 2 THEN 'IN-W' ELSE 'IN-E' END,
+    CASE n % 8 WHEN 0 THEN 'Bengaluru' WHEN 1 THEN 'Chennai'
+               WHEN 2 THEN 'Hyderabad' WHEN 3 THEN 'Pune'
+               WHEN 4 THEN 'Mumbai' WHEN 5 THEN 'Delhi'
+               WHEN 6 THEN 'Kolkata' ELSE 'Ahmedabad' END,
+    CASE n % 3 WHEN 0 THEN 'Enterprise' WHEN 1 THEN 'SMB' ELSE 'Retail' END,
+    CAST(10000 + ((n * 7919) % 490000) AS decimal(14,2)),
+    DATEADD(day, -((n * 13) % 3000), SYSUTCDATETIME()),
+    CASE WHEN n % 37 = 0 THEN 0 ELSE 1 END
+FROM N;
+GO
+
+CREATE TABLE Sales.Product
+(
+    ProductID int IDENTITY(1,1) NOT NULL
+        CONSTRAINT PK_Product PRIMARY KEY,
+    SKU varchar(30) NOT NULL CONSTRAINT UQ_Product_SKU UNIQUE,
+    ProductName varchar(200) NOT NULL,
+    Category varchar(80) NOT NULL,
+    UnitPrice decimal(12,2) NOT NULL,
+    CostPrice decimal(12,2) NOT NULL,
+    StockQuantity int NOT NULL,
+    ReorderLevel int NOT NULL,
+    SupplierName varchar(150) NOT NULL,
+    IsActive bit NOT NULL CONSTRAINT DF_Product_IsActive DEFAULT 1
+);
+GO
+
+;WITH N AS
+(
+    SELECT TOP (20000)
+           ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM sys.all_objects a
+    CROSS JOIN sys.all_objects b
+)
+INSERT Sales.Product
+(
+    SKU, ProductName, Category, UnitPrice, CostPrice,
+    StockQuantity, ReorderLevel, SupplierName, IsActive
+)
+SELECT
+    CONCAT('SKU-', RIGHT('000000' + CAST(n AS varchar(6)), 6)),
+    CONCAT('Product ', n),
+    CASE n % 10
+        WHEN 0 THEN 'Laptop'
+        WHEN 1 THEN 'Mobile'
+        WHEN 2 THEN 'Monitor'
+        WHEN 3 THEN 'Keyboard'
+        WHEN 4 THEN 'Mouse'
+        WHEN 5 THEN 'Networking'
+        WHEN 6 THEN 'Storage'
+        WHEN 7 THEN 'Software'
+        WHEN 8 THEN 'Accessories'
+        ELSE 'Services'
+    END,
+    CAST(100 + ((n * 1013) % 199900) / 10.0 AS decimal(12,2)),
+    CAST(60 + ((n * 877) % 100000) / 10.0 AS decimal(12,2)),
+    (n * 17) % 1000,
+    20 + (n % 100),
+    CONCAT('Supplier ', (n % 200) + 1),
+    CASE WHEN n % 47 = 0 THEN 0 ELSE 1 END
+FROM N;
+GO
+
+/* ---------------------------------------------------------------------------
+   Transactional tables
+--------------------------------------------------------------------------- */
+
+CREATE TABLE Sales.Orders
+(
+    OrderID bigint IDENTITY(1,1) NOT NULL
+        CONSTRAINT PK_Orders PRIMARY KEY,
+    OrderNumber varchar(30) NOT NULL
+        CONSTRAINT UQ_Orders_OrderNumber UNIQUE,
+    CustomerID int NOT NULL,
+    SalesEmployeeID int NOT NULL,
+    OrderDate datetime2(0) NOT NULL,
+    RegionCode varchar(10) NOT NULL,
+    OrderStatus varchar(30) NOT NULL,
+    PaymentStatus varchar(30) NOT NULL,
+    ShippingCity varchar(100) NOT NULL,
+    TotalAmount decimal(18,2) NOT NULL,
+    CreatedDate datetime2(0) NOT NULL,
+    CONSTRAINT FK_Orders_Customer
+        FOREIGN KEY (CustomerID) REFERENCES Sales.Customer(CustomerID),
+    CONSTRAINT FK_Orders_Employee
+        FOREIGN KEY (SalesEmployeeID) REFERENCES HR.Employee(EmployeeID)
+);
+GO
+
+;WITH N AS
+(
+    SELECT TOP (500000)
+           ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM sys.all_objects a
+    CROSS JOIN sys.all_objects b
+    CROSS JOIN (VALUES(1),(2),(3),(4),(5)) x(v)
+)
+INSERT Sales.Orders
+(
+    OrderNumber, CustomerID, SalesEmployeeID, OrderDate,
+    RegionCode, OrderStatus, PaymentStatus, ShippingCity,
+    TotalAmount, CreatedDate
+)
+SELECT
+    CONCAT('ORD', RIGHT('00000000' + CAST(n AS varchar(8)), 8)),
+    ((n - 1) % 250000) + 1,
+    ((n * 7) % 2000) + 1,
+    DATEADD(minute, -((n * 37) % 1576800), SYSUTCDATETIME()),
+    CASE n % 4 WHEN 0 THEN 'IN-S' WHEN 1 THEN 'IN-N'
+               WHEN 2 THEN 'IN-W' ELSE 'IN-E' END,
+    CASE n % 5 WHEN 0 THEN 'Pending' WHEN 1 THEN 'Confirmed'
+               WHEN 2 THEN 'Shipped' WHEN 3 THEN 'Delivered'
+               ELSE 'Cancelled' END,
+    CASE n % 4 WHEN 0 THEN 'Pending' WHEN 1 THEN 'Paid'
+               WHEN 2 THEN 'Paid' ELSE 'Failed' END,
+    CASE n % 8 WHEN 0 THEN 'Bengaluru' WHEN 1 THEN 'Chennai'
+               WHEN 2 THEN 'Hyderabad' WHEN 3 THEN 'Pune'
+               WHEN 4 THEN 'Mumbai' WHEN 5 THEN 'Delhi'
+               WHEN 6 THEN 'Kolkata' ELSE 'Ahmedabad' END,
+    CAST(500 + ((n * 7919) % 250000) / 10.0 AS decimal(18,2)),
+    DATEADD(minute, -((n * 41) % 1576800), SYSUTCDATETIME())
+FROM N;
+GO
+
+CREATE TABLE Sales.OrderItems
+(
+    OrderItemID bigint IDENTITY(1,1) NOT NULL
+        CONSTRAINT PK_OrderItems PRIMARY KEY,
+    OrderID bigint NOT NULL,
+    ProductID int NOT NULL,
+    Quantity int NOT NULL,
+    UnitPrice decimal(12,2) NOT NULL,
+    DiscountPercent decimal(5,2) NOT NULL,
+    LineAmount AS
+        (CONVERT(decimal(18,2),
+         Quantity * UnitPrice * (1 - DiscountPercent / 100.0))) PERSISTED,
+    CONSTRAINT FK_OrderItems_Order
+        FOREIGN KEY (OrderID) REFERENCES Sales.Orders(OrderID),
+    CONSTRAINT FK_OrderItems_Product
+        FOREIGN KEY (ProductID) REFERENCES Sales.Product(ProductID)
+);
+GO
+
+/* ~1.5 million rows: three items per order */
+INSERT Sales.OrderItems(OrderID, ProductID, Quantity, UnitPrice, DiscountPercent)
+SELECT
+    o.OrderID,
+    ((o.OrderID * v.ItemNo * 17) % 20000) + 1,
+    ((o.OrderID + v.ItemNo) % 5) + 1,
+    p.UnitPrice,
+    CAST(((o.OrderID + v.ItemNo * 7) % 21) AS decimal(5,2))
+FROM Sales.Orders o
+CROSS JOIN (VALUES(1),(2),(3)) v(ItemNo)
+JOIN Sales.Product p
+  ON p.ProductID = ((o.OrderID * v.ItemNo * 17) % 20000) + 1;
+GO
+
+CREATE TABLE Sales.Payment
+(
+    PaymentID bigint IDENTITY(1,1) NOT NULL
+        CONSTRAINT PK_Payment PRIMARY KEY,
+    OrderID bigint NOT NULL,
+    PaymentDate datetime2(0) NOT NULL,
+    PaymentMethod varchar(40) NOT NULL,
+    Amount decimal(18,2) NOT NULL,
+    TransactionReference varchar(80) NOT NULL,
+    PaymentStatus varchar(30) NOT NULL,
+    CONSTRAINT FK_Payment_Order
+        FOREIGN KEY (OrderID) REFERENCES Sales.Orders(OrderID)
+);
+GO
+
+INSERT Sales.Payment
+(
+    OrderID, PaymentDate, PaymentMethod, Amount,
+    TransactionReference, PaymentStatus
+)
+SELECT
+    OrderID,
+    DATEADD(minute, 15, OrderDate),
+    CASE OrderID % 4 WHEN 0 THEN 'UPI' WHEN 1 THEN 'CARD'
+                     WHEN 2 THEN 'BANK_TRANSFER' ELSE 'WALLET' END,
+    TotalAmount,
+    CONCAT('TXN-', OrderNumber),
+    CASE WHEN PaymentStatus = 'Paid' THEN 'SUCCESS'
+         WHEN PaymentStatus = 'Failed' THEN 'FAILED'
+         ELSE 'PENDING' END
+FROM Sales.Orders;
+GO
+
+/* ---------------------------------------------------------------------------
+   Monitoring / security exercise tables
+--------------------------------------------------------------------------- */
+
+CREATE TABLE Monitoring.ApplicationLog
+(
+    LogID bigint IDENTITY(1,1) NOT NULL
+        CONSTRAINT PK_ApplicationLog PRIMARY KEY,
+    EventTime datetime2(3) NOT NULL,
+    Severity varchar(20) NOT NULL,
+    ApplicationName varchar(100) NOT NULL,
+    HostName varchar(100) NOT NULL,
+    SessionID int NULL,
+    DurationMs int NULL,
+    ErrorNumber int NULL,
+    ErrorMessage varchar(1000) NULL,
+    QueryHash bigint NULL
+);
+GO
+
+;WITH N AS
+(
+    SELECT TOP (1000000)
+           ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM sys.all_objects a
+    CROSS JOIN sys.all_objects b
+    CROSS JOIN (VALUES(1),(2),(3),(4),(5),(6),(7),(8),(9),(10)) x(v)
+)
+INSERT Monitoring.ApplicationLog
+(
+    EventTime, Severity, ApplicationName, HostName,
+    SessionID, DurationMs, ErrorNumber, ErrorMessage, QueryHash
+)
+SELECT
+    DATEADD(second, -((n * 13) % 2592000), SYSUTCDATETIME()),
+    CASE n % 10 WHEN 0 THEN 'ERROR'
+                WHEN 1 THEN 'WARN'
+                WHEN 2 THEN 'WARN'
+                ELSE 'INFO' END,
+    CASE n % 5 WHEN 0 THEN 'OrderAPI' WHEN 1 THEN 'PaymentAPI'
+               WHEN 2 THEN 'InventoryAPI' WHEN 3 THEN 'ReportingAPI'
+               ELSE 'CustomerAPI' END,
+    CONCAT('APP-', (n % 30) + 1),
+    CASE WHEN n % 7 = 0 THEN NULL ELSE (n % 500) + 50 END,
+    CASE WHEN n % 9 = 0 THEN 2500 + (n % 7000)
+         ELSE 10 + (n % 500) END,
+    CASE WHEN n % 10 = 0 THEN
+            CASE n % 3 WHEN 0 THEN 1205 WHEN 1 THEN 1222 ELSE 1205 END
+         ELSE NULL END,
+    CASE WHEN n % 10 = 0 THEN
+            CASE n % 3 WHEN 0 THEN 'Transaction timeout'
+                         WHEN 1 THEN 'Lock request timeout period exceeded'
+                         ELSE 'Deadlock victim selected' END
+         ELSE NULL END,
+    CONVERT(bigint, ABS(CHECKSUM(CONCAT('Q', n % 1000))))
+FROM N;
+GO
+
+/* Fix the intentionally generated expression value if needed */
+UPDATE Monitoring.ApplicationLog
+SET ErrorNumber = 1205
+WHERE ErrorNumber IS NULL
+  AND Severity = 'ERROR'
+  AND ErrorMessage = 'Deadlock victim selected';
+GO
+
+CREATE TABLE SecurityLab.SensitiveCustomer
+(
+    SensitiveCustomerID int IDENTITY(1,1)
+        CONSTRAINT PK_SensitiveCustomer PRIMARY KEY,
+    CustomerID int NOT NULL,
+    GovernmentID varchar(30) NOT NULL,
+    CreditCardNumber varchar(32) NOT NULL,
+    EmailAddress varchar(200) NOT NULL,
+    PhoneNumber varchar(30) NOT NULL,
+    RegionCode varchar(10) NOT NULL
+);
+GO
+
+INSERT SecurityLab.SensitiveCustomer
+(
+    CustomerID, GovernmentID, CreditCardNumber,
+    EmailAddress, PhoneNumber, RegionCode
+)
+SELECT TOP (50000)
+    CustomerID,
+    CONCAT('GOV-', RIGHT('0000000000' + CAST(CustomerID AS varchar(10)), 10)),
+    CONCAT('411111111111', RIGHT('0000' + CAST(CustomerID % 10000 AS varchar(4)), 4)),
+    Email,
+    Phone,
+    RegionCode
+FROM Sales.Customer
+ORDER BY CustomerID;
+GO
+
+/* ---------------------------------------------------------------------------
+   Useful indexes
+--------------------------------------------------------------------------- */
+
+CREATE INDEX IX_Customer_Region
+    ON Sales.Customer(RegionCode)
+    INCLUDE(CustomerName, Email, City);
+
+CREATE INDEX IX_Customer_Email
+    ON Sales.Customer(Email);
+
+CREATE INDEX IX_Orders_OrderDate
+    ON Sales.Orders(OrderDate)
+    INCLUDE(CustomerID, SalesEmployeeID, RegionCode, OrderStatus, TotalAmount);
+
+CREATE INDEX IX_Orders_Customer
+    ON Sales.Orders(CustomerID, OrderDate)
+    INCLUDE(TotalAmount, OrderStatus);
+
+CREATE INDEX IX_Orders_RegionDate
+    ON Sales.Orders(RegionCode, OrderDate)
+    INCLUDE(CustomerID, TotalAmount, OrderStatus);
+
+CREATE INDEX IX_OrderItems_Order
+    ON Sales.OrderItems(OrderID)
+    INCLUDE(ProductID, Quantity, UnitPrice, DiscountPercent);
+
+CREATE INDEX IX_OrderItems_Product
+    ON Sales.OrderItems(ProductID, OrderID)
+    INCLUDE(Quantity, UnitPrice);
+
+CREATE INDEX IX_ApplicationLog_EventTime
+    ON Monitoring.ApplicationLog(EventTime)
+    INCLUDE(Severity, ApplicationName, DurationMs, ErrorNumber);
+
+CREATE INDEX IX_ApplicationLog_Severity
+    ON Monitoring.ApplicationLog(Severity, EventTime)
+    INCLUDE(ApplicationName, DurationMs, ErrorNumber);
+
+CREATE INDEX IX_SensitiveCustomer_Region
+    ON SecurityLab.SensitiveCustomer(RegionCode);
+GO
+
+/* ---------------------------------------------------------------------------
+   Views for demonstrations
+--------------------------------------------------------------------------- */
+
+CREATE OR ALTER VIEW Sales.vw_OrderSummary
+AS
+SELECT
+    o.OrderID,
+    o.OrderNumber,
+    o.OrderDate,
+    c.CustomerID,
+    c.CustomerName,
+    c.Email,
+    c.RegionCode AS CustomerRegion,
+    o.OrderStatus,
+    o.PaymentStatus,
+    o.TotalAmount
+FROM Sales.Orders o
+JOIN Sales.Customer c
+  ON c.CustomerID = o.CustomerID;
+GO
+
+CREATE OR ALTER VIEW Monitoring.vw_SlowApplicationEvents
+AS
+SELECT
+    LogID, EventTime, Severity, ApplicationName,
+    HostName, SessionID, DurationMs,
+    ErrorNumber, ErrorMessage, QueryHash
+FROM Monitoring.ApplicationLog
+WHERE DurationMs >= 3000;
+GO
+
+/* ---------------------------------------------------------------------------
+   Security demonstration: database roles
+--------------------------------------------------------------------------- */
+
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'db_Day2_ReadOnly')
+    CREATE ROLE db_Day2_ReadOnly;
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'db_Day2_Sales')
+    CREATE ROLE db_Day2_Sales;
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'db_Day2_Monitoring')
+    CREATE ROLE db_Day2_Monitoring;
+GO
+
+GRANT SELECT ON SCHEMA::Sales TO db_Day2_ReadOnly;
+GRANT SELECT ON SCHEMA::Sales TO db_Day2_Sales;
+GRANT SELECT ON SCHEMA::Monitoring TO db_Day2_Monitoring;
+GRANT SELECT ON OBJECT::SecurityLab.SensitiveCustomer TO db_Day2_Monitoring;
+DENY SELECT ON OBJECT::SecurityLab.SensitiveCustomer TO db_Day2_ReadOnly;
+GO
+
+/* ---------------------------------------------------------------------------
+   Statistics update after bulk load
+--------------------------------------------------------------------------- */
+
+EXEC sys.sp_updatestats;
+GO
+
+/* ---------------------------------------------------------------------------
+   Validation
+--------------------------------------------------------------------------- */
+
+SELECT DB_NAME() AS CurrentDatabase,
+       DATABASEPROPERTYEX(DB_NAME(), 'Recovery') AS RecoveryModel,
+       DATABASEPROPERTYEX(DB_NAME(), 'CompatibilityLevel') AS CompatibilityLevel;
+
+SELECT
+    s.name AS SchemaName,
+    t.name AS TableName,
+    SUM(p.rows) AS ApproxRows
+FROM sys.tables t
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0,1)
+GROUP BY s.name, t.name
+ORDER BY SUM(p.rows) DESC;
+
+SELECT
+    SUM(size) * 8.0 / 1024 AS DatabaseSizeMB
+FROM sys.database_files;
+
+PRINT 'DBA_Day2_Lab is ready for the Day 2 DBA labs.';
+GO
