@@ -1,0 +1,173 @@
+--Step 1: Create Lab Database
+
+-- Create database for testing
+IF EXISTS (SELECT 1 FROM sys.databases WHERE name = 'PerformanceLab')
+BEGIN
+    ALTER DATABASE PerformanceLab SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE PerformanceLab;
+END
+GO
+
+CREATE DATABASE PerformanceLab
+ON PRIMARY
+(
+    NAME = 'PerformanceLab_data',
+    FILENAME = 'C:\Program Files\Microsoft SQL Server\MSSQL17.MSSQLSERVER01\MSSQL\DATA\PerformanceLab.mdf',
+    SIZE = 100 MB,
+    FILEGROWTH = 10 MB
+)
+LOG ON
+(
+    NAME = 'PerformanceLab_log',
+    FILENAME = 'C:\Program Files\Microsoft SQL Server\MSSQL17.MSSQLSERVER01\MSSQL\DATA\PerformanceLab_log.ldf',
+    SIZE = 50 MB,
+    FILEGROWTH = 5 MB
+);
+GO
+
+USE PerformanceLab;
+GO
+-------------------------------------------
+-- Step 2: Create Sample Tables with Data
+
+-- Create Customers table
+CREATE TABLE dbo.Customers
+(
+    CustomerID INT PRIMARY KEY IDENTITY(1,1),
+    FirstName NVARCHAR(100) NOT NULL,
+    LastName NVARCHAR(100) NOT NULL,
+    Email NVARCHAR(100) NOT NULL UNIQUE,
+    Phone NVARCHAR(20),
+    City NVARCHAR(100),
+    State NVARCHAR(50),
+    Country NVARCHAR(100),
+    CreatedDate DATETIME2 DEFAULT SYSDATETIME(),
+    ModifiedDate DATETIME2 DEFAULT SYSDATETIME()
+);
+
+-- Create Orders table
+CREATE TABLE dbo.Orders
+(
+    OrderID INT PRIMARY KEY IDENTITY(1,1),
+    CustomerID INT NOT NULL FOREIGN KEY REFERENCES dbo.Customers(CustomerID),
+    OrderDate DATETIME2 NOT NULL,
+    ShipDate DATETIME2,
+    TotalAmount DECIMAL(10,2) NOT NULL,
+    Status NVARCHAR(50) DEFAULT 'Pending',
+    CreatedDate DATETIME2 DEFAULT SYSDATETIME()
+);
+
+-- Create OrderDetails table
+CREATE TABLE dbo.OrderDetails
+(
+    OrderDetailID INT PRIMARY KEY IDENTITY(1,1),
+    OrderID INT NOT NULL FOREIGN KEY REFERENCES dbo.Orders(OrderID),
+    ProductID INT NOT NULL,
+    Quantity INT NOT NULL,
+    UnitPrice DECIMAL(10,2) NOT NULL,
+    LineTotal AS (Quantity * UnitPrice) PERSISTED
+);
+
+-- Create Products table
+CREATE TABLE dbo.Products
+(
+    ProductID INT PRIMARY KEY IDENTITY(1,1),
+    ProductName NVARCHAR(200) NOT NULL,
+    Category NVARCHAR(100),
+    ListPrice DECIMAL(10,2),
+    StockQuantity INT DEFAULT 0
+);
+GO
+-------------------------------------------------
+
+-- Step 3: Populate Sample Data
+
+-- Populate Customers
+SET IDENTITY_INSERT dbo.Customers ON;
+
+DECLARE @i INT = 1;
+WHILE @i <= 10000
+BEGIN
+    INSERT INTO dbo.Customers (CustomerID, FirstName, LastName, Email, Phone, City, State, Country)
+    VALUES 
+    (
+        @i,
+        'Customer' + CAST(@i AS NVARCHAR(10)),
+        'Test' + CAST(@i % 100 AS NVARCHAR(10)),
+        'customer' + CAST(@i AS NVARCHAR(10)) + '@example.com',
+        '555-' + FORMAT(@i, '0000'),
+        'City' + CAST(@i % 50 AS NVARCHAR(10)),
+        'ST',
+        'USA'
+    );
+    SET @i = @i + 1;
+END
+
+SET IDENTITY_INSERT dbo.Customers OFF;
+GO
+
+-- Populate Products
+INSERT INTO dbo.Products (ProductName, Category, ListPrice, StockQuantity)
+SELECT 
+    'Product ' + CAST(ROW_NUMBER() OVER (ORDER BY @@SPID) AS NVARCHAR(10)),
+    'Category' + CAST(ROW_NUMBER() OVER (ORDER BY @@SPID) % 10 AS NVARCHAR(10)),
+    ROUND(RAND() * 1000 + 10, 2),
+    CAST(RAND() * 1000 AS INT)
+FROM sys.objects
+WHERE ROW_NUMBER() OVER (ORDER BY @@SPID) <= 100;
+GO
+
+-- Populate Orders and OrderDetails
+DECLARE @CustomerID INT, @OrderID INT;
+DECLARE @OrderCount INT = 0;
+
+DECLARE @CustomerCursor CURSOR;
+SET @CustomerCursor = CURSOR FOR SELECT CustomerID FROM dbo.Customers ORDER BY CustomerID;
+OPEN @CustomerCursor;
+
+FETCH NEXT FROM @CustomerCursor INTO @CustomerID;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    DECLARE @OrdersPerCustomer INT = CAST(RAND() * 5 + 1 AS INT);
+    DECLARE @OrderIdx INT = 0;
+    
+    WHILE @OrderIdx < @OrdersPerCustomer
+    BEGIN
+        INSERT INTO dbo.Orders (CustomerID, OrderDate, TotalAmount, Status)
+        VALUES 
+        (
+            @CustomerID,
+            DATEADD(DAY, -CAST(RAND() * 365 AS INT), GETDATE()),
+            ROUND(RAND() * 5000 + 100, 2),
+            CASE CAST(RAND() * 3 AS INT) WHEN 0 THEN 'Pending' WHEN 1 THEN 'Shipped' ELSE 'Delivered' END
+        );
+        
+        SET @OrderID = SCOPE_IDENTITY();
+        
+        -- Add order details
+        DECLARE @DetailCount INT = CAST(RAND() * 5 + 1 AS INT);
+        DECLARE @DetailIdx INT = 0;
+        
+        WHILE @DetailIdx < @DetailCount
+        BEGIN
+            INSERT INTO dbo.OrderDetails (OrderID, ProductID, Quantity, UnitPrice)
+            VALUES
+            (
+                @OrderID,
+                CAST(RAND() * 100 + 1 AS INT),
+                CAST(RAND() * 10 + 1 AS INT),
+                ROUND(RAND() * 500 + 10, 2)
+            );
+            
+            SET @DetailIdx = @DetailIdx + 1;
+        END
+        
+        SET @OrderIdx = @OrderIdx + 1;
+    END
+    
+    FETCH NEXT FROM @CustomerCursor INTO @CustomerID;
+END
+
+CLOSE @CustomerCursor;
+DEALLOCATE @CustomerCursor;
+GO
