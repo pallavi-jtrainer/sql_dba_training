@@ -1,0 +1,624 @@
+Collecting Evidence with DMVs
+
+-- Query 1: Current System Health Overview
+SELECT 
+    GETDATE() as [Collection_Time],
+    @@SERVERNAME as [Server_Name],
+    DB_NAME() as [Database_Name],
+    SERVERPROPERTY('ProductVersion') as [SQL_Version];
+
+-- Query 2: Current CPU and Memory Utilization
+SELECT 
+    CAST(100.0 * 
+        SUM(CASE 
+                when counter_name = 'Total Server Memory(KB)'
+                then cntr_value
+                else 0
+             end )
+             / Nullif(
+                    sum(case 
+                        when counter_name = 'Target Server Memory (KB)'
+                        then cntr_value
+                        else 0
+                    end), 
+                    0
+                    ) as numeric(5,2)
+                   ) as Memory_Utilization_Percent, osi.sqlserver_start_time
+           from sys.dm_os_performance_counters pc
+           cross join sys.dm_os_sys_info osi
+           where pc.object_name LIKE '%Memory Manager%'
+           and pc.counter_name in ('Total Server Memory (KB)', 'Target Server Memory (KB)')
+           group by osi.sqlserver_start_time;
+
+-- Query 3: Top Wait Types (Most Important!)
+SELECT TOP 10
+    wait_type,
+    wait_time_ms,
+    wait_time_ms / waiting_tasks_count as [Avg_Wait_ms],
+    waiting_tasks_count,
+    CAST(100.0 * wait_time_ms / SUM(wait_time_ms) OVER () AS NUMERIC(5,2)) as [Percent_Total]
+FROM sys.dm_os_wait_stats
+WHERE wait_type NOT IN (
+    'SQLTRACE_INCREMENTAL_FLUSH_SLEEP',
+    'SQLTRACE_BUFFER_FLUSH',
+    'LAZYWRITER_SLEEP',
+    'SLEEP_TASK',
+    'REQUEST_FOR_DEADLOCK_SEARCH',
+    'LOGMGR_QUEUE',
+    'CLR_AUTO_EVENT',
+    'CLR_MANUAL_EVENT'
+)
+ORDER BY wait_time_ms DESC;
+
+-- Query 4: Top Resource-Consuming Sessions
+SELECT TOP 10
+    r.session_id,
+    r.login_name,
+    r.status,
+    r.command,
+    CONVERT(VARCHAR(10), CONVERT(DATETIME, 
+        CONVERT(VARCHAR(25), r.start_time, 121)), 121) as [Start_Time],
+    DATEDIFF(SECOND, r.start_time, GETDATE()) as [Duration_Seconds],
+    r.cpu_time as [CPU_Time_ms],
+    r.total_elapsed_time as [Elapsed_Time_ms],
+    r.logical_reads,
+    r.reads,
+    r.writes,
+    t.text
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.session_id > 50
+ORDER BY r.cpu_time DESC;
+
+-- Query 5: Current Blocking Chain
+SELECT 
+    blocking_session_id,
+    session_id,
+    wait_duration_ms,
+    wait_type,
+    last_wait_type
+FROM sys.dm_exec_requests
+WHERE blocking_session_id <> 0;
+
+------------------------------------------------------------
+Baseline Collection Script
+
+-- Create baseline collection procedure
+CREATE PROCEDURE sp_CollectPerformanceBaseline
+    @BaselineName NVARCHAR(100),
+    @Notes NVARCHAR(MAX) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Table to store baseline data
+    IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'PerformanceBaseline')
+    BEGIN
+        CREATE TABLE PerformanceBaseline (
+            BaselineID INT PRIMARY KEY IDENTITY(1,1),
+            BaselineName NVARCHAR(100) NOT NULL,
+            CollectionTime DATETIME NOT NULL,
+            MetricType NVARCHAR(50) NOT NULL,
+            MetricName NVARCHAR(255) NOT NULL,
+            MetricValue NVARCHAR(MAX),
+            Notes NVARCHAR(MAX)
+        );
+        CREATE INDEX idx_baseline_name_time ON PerformanceBaseline(BaselineName, CollectionTime);
+    END
+    
+    DECLARE @Now DATETIME = GETDATE();
+    
+    -- Collect CPU Baseline
+    INSERT INTO PerformanceBaseline 
+    VALUES 
+    (@BaselineName, @Now, 'CPU', 'CPU_Usage_Percent', 
+     CAST((SELECT TOP 1 CAST(100.0 * SUM(cntr_value) 
+            / (SELECT cntr_value FROM sys.dm_os_performance_counters 
+               WHERE counter_name = 'Total Server Memory (KB)') 
+            AS NUMERIC(5,2))
+            FROM sys.dm_os_performance_counters
+            WHERE object_name LIKE '%Memory Manager%'), NVARCHAR(MAX)), 
+     @Notes);
+    
+    -- Collect Memory Baseline
+    INSERT INTO PerformanceBaseline 
+    VALUES 
+    (@BaselineName, @Now, 'MEMORY', 'Available_Memory_MB',
+     CAST((SELECT (cntr_value / 1024) FROM sys.dm_os_performance_counters 
+           WHERE object_name LIKE '%Memory Manager%' 
+           AND counter_name = 'Available Memory (KB)'), NVARCHAR(MAX)),
+     @Notes);
+    
+    -- Collect I/O Baseline for all drives
+    INSERT INTO PerformanceBaseline 
+    SELECT 
+        @BaselineName, @Now, 'DISK_IO', 
+        'Logical_Reads_Per_Sec_' + CAST(ROW_NUMBER() OVER (ORDER BY database_id) AS NVARCHAR(10)),
+        CAST(io.num_of_reads, NVARCHAR(MAX)),
+        @Notes
+    FROM sys.dm_io_virtual_file_stats(NULL, NULL) io
+    WHERE database_id > 4;  -- Skip system databases
+    
+    -- Collect Wait Stats Baseline
+    INSERT INTO PerformanceBaseline 
+    SELECT TOP 5
+        @BaselineName, @Now, 'WAIT_STATS', wait_type,
+        CAST(wait_time_ms AS NVARCHAR(MAX)),
+        @Notes
+    FROM sys.dm_os_wait_stats
+    WHERE wait_type NOT IN ('SQLTRACE_INCREMENTAL_FLUSH_SLEEP', 'SLEEP_TASK')
+    ORDER BY wait_time_ms DESC;
+    
+    -- Collect Active Query Baseline
+    INSERT INTO PerformanceBaseline 
+    SELECT TOP 10
+        @BaselineName, @Now, 'ACTIVE_QUERIES', 
+        SUBSTRING(t.text, 1, 100),
+        'CPU:' + CAST(r.cpu_time AS NVARCHAR(20)) + 
+        'ms, Elapsed:' + CAST(r.total_elapsed_time AS NVARCHAR(20)) + 'ms',
+        @Notes
+    FROM sys.dm_exec_requests r
+    CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+    WHERE r.session_id > 50
+    ORDER BY r.cpu_time DESC;
+    
+    PRINT 'Baseline ''' + @BaselineName + ''' collected at ' + CAST(@Now AS NVARCHAR(25));
+END;
+GO
+
+-- Execute to collect baseline
+EXEC sp_CollectPerformanceBaseline 
+    @BaselineName = 'Monday_Morning_Normal',
+    @Notes = 'Baseline collected during normal operations';
+
+-- Compare current state to baseline
+DECLARE @BaselineName NVARCHAR(100) = 'Monday_Morning_Normal';
+
+SELECT 
+    b.MetricType,
+    b.MetricName,
+    b.MetricValue as [Baseline_Value],
+    (SELECT TOP 1 MetricValue FROM PerformanceBaseline 
+     WHERE MetricType = b.MetricType 
+     AND MetricName = b.MetricName 
+     ORDER BY CollectionTime DESC OFFSET 1 ROW) as [Current_Value]
+FROM PerformanceBaseline b
+WHERE b.BaselineName = @BaselineName
+GROUP BY b.MetricType, b.MetricName, b.MetricValue;
+
+----------------------------------------------------------
+DMV 1: sys.dm_os_wait_stats
+-- The most important query any DBA should know (Updated 2025 for SQL Server 2022+)
+SELECT TOP 20
+    wait_type,
+    waiting_tasks_count,
+    wait_time_ms,
+    avg_wait_time_ms = CAST(wait_time_ms / NULLIF(waiting_tasks_count, 0) AS NUMERIC(12,2)),
+    percent_total = CAST(100.0 * wait_time_ms 
+                        / SUM(wait_time_ms) OVER () AS NUMERIC(5,2)),
+    CAST(wait_time_ms / 1000.0 / 60.0 AS NUMERIC(10,2)) as [Total_Minutes]
+FROM sys.dm_os_wait_stats
+WHERE wait_type NOT IN (
+    'SQLTRACE_INCREMENTAL_FLUSH_SLEEP',
+    'LOGMGR_QUEUE',
+    'CHECKPOINT_QUEUE',
+    'REQUEST_FOR_DEADLOCK_SEARCH',
+    'SLEEP_TASK',
+    'LAZYWRITER_SLEEP',
+    'BROKER_EVENTHANDLER',
+    'BROKER_RECEIVE_WAITFOR',
+    'BROKER_TO_FLUSH',
+    'BROKER_TRANSMITTER',
+    'SLEEP_SYSTEMTASK',
+    'WAITFOR_TASKSHOP',
+    'HADR_CLUSAPI_CALL',
+    'HADR_FILESTREAM_IOMGR_IOCOMPLETION'
+)
+ORDER BY wait_time_ms DESC;
+
+-----------------------------------------------------
+DMV 2: sys.dm_exec_requests
+-- See what queries are running RIGHT NOW (Updated 2025)
+SELECT 
+    r.session_id,
+    r.request_id,
+    r.status,
+    r.command,
+    r.cpu_time as [CPU_ms],
+    r.total_elapsed_time as [Elapsed_ms],
+    r.logical_reads,
+    r.writes,
+    r.start_time,
+    DATEDIFF(SECOND, r.start_time, GETDATE()) as [Running_Seconds],
+    r.wait_type,
+    r.wait_time_ms,
+    r.dop as [Degree_of_Parallelism],  -- NEW in 2019+
+    r.granted_query_memory * 8 / 1024 as [Memory_Grant_MB],
+    r.spills,  -- NEW in 2016 SP2+, enhanced in 2022
+    DB_NAME(r.database_id) as [Database],
+    SUBSTRING(t.text, 1, 100) as [Query_Text],
+    l.login_name,
+    l.program_name
+FROM sys.dm_exec_requests r
+LEFT JOIN sys.dm_exec_sql_text(r.sql_handle) t ON 1=1
+LEFT JOIN sys.dm_exec_sessions l ON r.session_id = l.session_id
+WHERE r.session_id > 50
+ORDER BY r.cpu_time DESC;
+
+-----------------------------------------------------
+DMV 3: sys.dm_exec_sessions
+-- Who's connected and what resources (Updated 2025)
+SELECT TOP 30
+    s.session_id,
+    s.login_name,
+    s.host_name,
+    s.program_name,
+    s.database_id,
+    s.status,
+    s.cpu_time,
+    s.memory_usage * 8 / 1024 as [Memory_Usage_MB],
+    s.logical_reads,
+    s.login_time,
+    DATEDIFF(MINUTE, s.login_time, GETDATE()) as [Connected_Minutes],
+    s.protocol_type,  -- NEW in 2019+: tcp, named_pipe, shared_memory
+    s.endpoint_id  -- NEW in 2019+
+FROM sys.dm_exec_sessions s
+WHERE s.session_id > 50
+ORDER BY s.cpu_time DESC;
+
+----------------------------------------------------------
+DMV 4: sys.dm_db_index_operational_stats
+-- Find fragmented and slow-performing indexes (Updated 2025)
+SELECT 
+    DB_NAME(ios.database_id) as [Database],
+    OBJECT_NAME(ios.object_id, ios.database_id) as [Table],
+    i.name as [Index],
+    i.type_desc as [Index_Type],
+    ios.leaf_insert_count,
+    ios.leaf_delete_count,
+    ios.leaf_update_count,
+    (ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count) 
+        as [Total_Modifications],
+    ios.range_scan_count,
+    ios.singleton_lookup_count,
+    (ios.range_scan_count + ios.singleton_lookup_count) as [Total_Reads],
+    CASE 
+        WHEN (ios.range_scan_count + ios.singleton_lookup_count) = 0 THEN 0
+        ELSE CAST(100.0 * ios.singleton_lookup_count / 
+            (ios.range_scan_count + ios.singleton_lookup_count) AS NUMERIC(5,2))
+    END as [Seek_Percent],
+    ps.avg_fragmentation_in_percent,
+    ps.page_count,
+    ps.compressed_page_count  -- NEW in 2016+
+FROM sys.dm_db_index_operational_stats(NULL, NULL, NULL, NULL) ios
+INNER JOIN sys.indexes i 
+    ON ios.object_id = i.object_id 
+    AND ios.index_id = i.index_id
+INNER JOIN sys.dm_db_index_physical_stats(NULL, NULL, NULL, NULL, 'LIMITED') ps
+    ON ios.database_id = ps.database_id
+    AND ios.object_id = ps.object_id
+    AND ios.index_id = ps.index_id
+WHERE ios.database_id > 4
+    AND ps.avg_fragmentation_in_percent > 10
+    AND ps.page_count > 1000
+    AND OBJECT_NAME(ios.object_id, ios.database_id) IS NOT NULL
+ORDER BY ps.avg_fragmentation_in_percent DESC;
+
+-------------------------------------------------------
+DMV 5: sys.dm_exec_query_stats
+-- Find most resource-intensive queries (Updated 2025)
+SELECT TOP 20
+    CAST(SUM(qs.total_worker_time) / 1000000.0 AS NUMERIC(20,2)) as [Total_CPU_Sec],
+    CAST(SUM(qs.total_elapsed_time) / 1000000.0 AS NUMERIC(20,2)) as [Total_Elapsed_Sec],
+    CAST(SUM(qs.total_logical_reads) / 1000.0 AS NUMERIC(20,2)) as [Total_Logical_Reads_K],
+    COUNT(qs.execution_count) as [Execution_Count],
+    CAST(AVG(qs.total_elapsed_time) / 1000.0 AS NUMERIC(20,2)) as [Avg_Elapsed_ms],
+    CAST(SUM(qs.total_rows) AS NUMERIC(20,2)) as [Total_Rows_Returned],
+    MAX(qs.creation_time) as [First_Execution],
+    MAX(qs.last_execution_time) as [Last_Execution],
+    SUBSTRING(t.text, 1, 100) as [Query_Text]
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) t
+GROUP BY qs.sql_handle, t.text
+ORDER BY SUM(qs.total_worker_time) DESC;
+
+----------------------------------------------------
+Build Your Monitoring Dashboard
+-- COMPREHENSIVE PERFORMANCE DASHBOARD
+-- Run this query to see overall system health at a glance
+
+PRINT '════════════════════════════════════════════════════════════';
+PRINT 'SQL SERVER PERFORMANCE DASHBOARD - ' + CONVERT(VARCHAR(25), GETDATE(), 121);
+PRINT '════════════════════════════════════════════════════════════';
+PRINT '';
+
+-- Section 1: CPU and Memory
+PRINT '1. CPU & MEMORY STATUS';
+PRINT '─────────────────────';
+SELECT TOP 1
+    'CPU_Utilization' as [Metric],
+    CAST(100.0 * (SELECT SUM(cntr_value) 
+        FROM sys.dm_os_performance_counters 
+        WHERE object_name LIKE '%Processor%' 
+        AND counter_name = '% Processor Time' 
+        AND instance_name = '_Total') 
+        / (SELECT cntr_value 
+           FROM sys.dm_os_performance_counters 
+           WHERE object_name LIKE '%Processor%' 
+           AND counter_name = '% Processor Time' 
+           AND instance_name = '_Total') AS NUMERIC(5,2)) as [Value],
+    'Percent' as [Unit]
+FROM sys.dm_os_schedulers;
+
+-- Section 2: Top Wait Types
+PRINT '';
+PRINT '2. TOP 5 WAIT TYPES';
+PRINT '───────────────────';
+SELECT TOP 5
+    CAST(ROW_NUMBER() OVER (ORDER BY wait_time_ms DESC) AS VARCHAR(2)) + '. ' + 
+        wait_type as [Wait_Type],
+    CAST(CAST(wait_time_ms / 1000.0 AS NUMERIC(12,2)) AS VARCHAR(15)) + ' sec' as [Total_Wait],
+    CAST(CAST(wait_time_ms / NULLIF(waiting_tasks_count, 0) AS NUMERIC(10,2)) AS VARCHAR(15)) + ' ms' as [Avg_Wait]
+FROM sys.dm_os_wait_stats
+WHERE wait_type NOT LIKE 'SLEEP%'
+    AND wait_type NOT LIKE 'SQLTRACE%'
+ORDER BY wait_time_ms DESC;
+
+-- Section 3: Top Resource Queries
+PRINT '';
+PRINT '3. TOP 5 RESOURCE-CONSUMING QUERIES (LAST 24 HOURS)';
+PRINT '─────────────────────────────────────────────────────';
+SELECT TOP 5
+    CAST(ROW_NUMBER() OVER (ORDER BY SUM(qs.total_worker_time) DESC) AS VARCHAR(2)) + '. ' +
+        SUBSTRING(t.text, 1, 60) as [Query],
+    CAST(SUM(qs.total_worker_time) / 1000000.0 AS NUMERIC(12,2)) as [CPU_Seconds],
+    SUM(qs.execution_count) as [Executions],
+    CAST(AVG(qs.total_elapsed_time) / 1000.0 AS NUMERIC(10,2)) as [Avg_Time_ms]
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) t
+WHERE qs.creation_time > DATEADD(HOUR, -24, GETDATE())
+GROUP BY qs.sql_handle, t.text
+ORDER BY SUM(qs.total_worker_time) DESC;
+
+-- Section 4: Currently Running Queries
+PRINT '';
+PRINT '4. ACTIVE REQUESTS (RUNNING RIGHT NOW)';
+PRINT '──────────────────────────────────────';
+SELECT 
+    CAST(r.session_id AS VARCHAR(5)) + ' (' + r.status + ')' as [Session],
+    SUBSTRING(t.text, 1, 50) as [Query],
+    CAST(DATEDIFF(SECOND, r.start_time, GETDATE()) AS VARCHAR(5)) + ' sec' as [Running_For]
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.session_id > 50;
+
+-- Section 5: Index Fragmentation
+PRINT '';
+PRINT '5. MOST FRAGMENTED INDEXES';
+PRINT '───────────────────────────';
+SELECT TOP 5
+    OBJECT_NAME(i.object_id) as [Table],
+    i.name as [Index],
+    CAST(ps.avg_fragmentation_in_percent AS NUMERIC(5,2)) as [Fragmentation_%]
+FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'LIMITED') ps
+INNER JOIN sys.indexes i 
+    ON ps.object_id = i.object_id 
+    AND ps.index_id = i.index_id
+WHERE ps.avg_fragmentation_in_percent > 10
+    AND ps.page_count > 1000
+ORDER BY ps.avg_fragmentation_in_percent DESC;
+
+PRINT '';
+PRINT '════════════════════════════════════════════════════════════';
+-----------------------------------------------------------
+
+Capture Long-Running Queries: Create an Extended Event session to capture queries running longer than 5 seconds
+-- First, check if session exists and drop it
+IF EXISTS (SELECT * FROM sys.server_event_sessions WHERE name = 'LongRunningQueries')
+    DROP EVENT SESSION [LongRunningQueries] ON SERVER;
+GO
+
+-- Create the Long-Running Queries session
+CREATE EVENT SESSION [LongRunningQueries] ON SERVER 
+ADD EVENT sqlserver.sp_statement_completed 
+(
+    ACTION(sqlserver.sql_text, sqlserver.database_id, sqlserver.client_hostname, sqlserver.login_name)
+    WHERE (duration > 5000000)  -- Duration is in microseconds, so 5000000 = 5 seconds
+)
+ADD TARGET package0.event_file 
+(
+    SET filename = 'C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Log\LongRunningQueries.xel'
+)
+WITH (
+    MAX_MEMORY = 4096 KB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MAX_DISPATCH_LATENCY = 30 SECONDS,
+    TRACK_CAUSALITY = OFF,
+    STARTUP_STATE = OFF
+);
+GO
+
+-- Start the session
+ALTER EVENT SESSION [LongRunningQueries] ON SERVER STATE = START;
+GO
+
+-- Query to see active sessions
+SELECT 
+    name as [Session_Name],
+    state as [State],
+    startup_state
+FROM sys.server_event_sessions
+WHERE name = 'LongRunningQueries';
+--------------------------------------------------------
+
+Capture Deadlocks Information:
+-- Drop if exists
+IF EXISTS (SELECT * FROM sys.server_event_sessions WHERE name = 'DeadlockMonitor')
+    DROP EVENT SESSION [DeadlockMonitor] ON SERVER;
+GO
+
+-- Create Deadlock monitoring session
+CREATE EVENT SESSION [DeadlockMonitor] ON SERVER 
+ADD EVENT sqlserver.xml_deadlock_report 
+(
+    ACTION(sqlserver.session_id, sqlserver.sql_text, sqlserver.login_name)
+)
+ADD TARGET package0.event_file 
+(
+    SET filename = 'C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Log\DeadlockMonitor.xel',
+    SET max_file_size = 50 -- 50 MB
+)
+WITH (
+    MAX_MEMORY = 4096 KB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    TRACK_CAUSALITY = OFF,
+    STARTUP_STATE = ON
+);
+GO
+
+-- Start the session
+ALTER EVENT SESSION [DeadlockMonitor] ON SERVER STATE = START;
+GO
+
+-- Verify it's running
+SELECT 
+    name,
+    state,
+    package0 = (SELECT COUNT(*) FROM sys.server_event_session_targets 
+                WHERE event_session_id = (SELECT event_session_id FROM sys.server_event_sessions 
+                                         WHERE name = 'DeadlockMonitor'))
+FROM sys.server_event_sessions
+WHERE name = 'DeadlockMonitor';
+---------------------------------------------------------------
+
+Capture Login Attempts & Failures for security monitoring:
+-- Capture all logins and failures
+IF EXISTS (SELECT * FROM sys.server_event_sessions WHERE name = 'LoginAudit')
+    DROP EVENT SESSION [LoginAudit] ON SERVER;
+GO
+
+CREATE EVENT SESSION [LoginAudit] ON SERVER 
+ADD EVENT sqlserver.login 
+(
+    ACTION(sqlserver.client_hostname, sqlserver.nt_username)
+),
+ADD EVENT sqlserver.login_failed 
+(
+    ACTION(sqlserver.client_hostname, sqlserver.nt_username)
+)
+ADD TARGET package0.event_file 
+(
+    SET filename = 'C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Log\LoginAudit.xel'
+)
+WITH (
+    MAX_MEMORY = 4096 KB,
+    STARTUP_STATE = ON
+);
+GO
+
+ALTER EVENT SESSION [LoginAudit] ON SERVER STATE = START;
+--------------------------------------------------------------
+Performance Counter Monitoring
+-- Monitor specific Performance Monitor counters via T-SQL
+SELECT 
+    counter_name,
+    cntr_value,
+    CASE 
+        WHEN counter_name LIKE '%Reads%' THEN 'Reads/sec'
+        WHEN counter_name LIKE '%Writes%' THEN 'Writes/sec'
+        WHEN counter_name LIKE '% Processor%' THEN 'Percent'
+        WHEN counter_name LIKE '%Memory%' THEN 'KB'
+        ELSE 'Count'
+    END as [Unit]
+FROM sys.dm_os_performance_counters
+WHERE object_name IN (
+    'MSSQL$MSSQLSERVER:General Statistics',
+    'MSSQL$MSSQLSERVER:SQL Statistics',
+    'MSSQL$MSSQLSERVER:Locks'
+)
+ORDER BY object_name, counter_name;
+
+--------------------------------------------------
+Blocking & Lock Waits - Troubleshooting
+-- Step 1: Identify blocking chains
+SELECT 
+    blocking_session_id,
+    session_id,
+    wait_duration_ms,
+    wait_type,
+    status
+FROM sys.dm_exec_requests
+WHERE blocking_session_id <> 0
+ORDER BY blocking_session_id;
+
+-- See what the BLOCKING session (55 in our example) is doing
+SELECT 
+    r.session_id,
+    r.status,
+    r.command,
+    r.cpu_time,
+    r.total_elapsed_time / 1000 as [Elapsed_Seconds],
+    DATEDIFF(SECOND, r.start_time, GETDATE()) as [Running_Seconds],
+    t.text
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.session_id = 55;  -- The BLOCKING session ID
+
+-- See what the BLOCKED session (60) wants to do
+SELECT 
+    r.session_id,
+    r.status,
+    t.text,
+    r.wait_resource  -- This shows which resource it's waiting for
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.session_id = 60;  -- The BLOCKED session ID
+
+-------------------------------------------
+checklist
+1. identify the blocking session id and check how it is running
+2. confirm the sql statement that is blocking it
+3. check if the blocker is in a transaction
+4. verify how many sessions are blocked
+5. do an rca
+6. apply the fix
+7. confirm blocking is resolved with follow up queries
+8. document incident
+
+--------------------------------
+checklist to Resolve a Deadlock
+1. which sessions involved?
+2. what object is locked?
+3. which sql statements are executing?
+4. what is the transaction acquired by the first lock?
+5. the order in which the resources were accessed
+6. why were the transactions help open
+
+Investigation
+1. find the active blockings
+2. extended events capture deadlock
+3. extract deadlock info from system.health
+
+Solution
+1. consistent access order
+2. keep transactions short
+3. check indexes
+4. consider transaction isolation
+5. use nolock for readers
+6. enable READ_COMMITTED_SNAPSHOT
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
