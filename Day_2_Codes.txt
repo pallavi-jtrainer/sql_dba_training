@@ -1,0 +1,986 @@
+================================================================================
+SQL SERVER 2025 DBA TRAINING - DAY 2
+MONITORING, TROUBLESHOOTING & LOG ANALYSIS - ALL WORKING CODES
+================================================================================
+
+IMPORTANT: 
+- All scripts tested on SQL Server 2025
+- Some queries require DMV access permissions
+- Use with caution - some operations like KILL can terminate sessions
+- Always test in LAB before using on PRODUCTION
+
+================================================================================
+SECTION 1: PERFORMANCE BASELINE ESTABLISHMENT
+================================================================================
+
+-- SQL Script: Create Baseline Tracking Table
+
+USE SampleDB;
+
+-- Drop if exists
+IF OBJECT_ID('dbo.PerformanceBaseline', 'U') IS NOT NULL
+    DROP TABLE dbo.PerformanceBaseline;
+
+-- Create baseline table
+CREATE TABLE dbo.PerformanceBaseline
+(
+    BaselineID INT PRIMARY KEY IDENTITY(1,1),
+    CaptureDate DATETIME2 DEFAULT GETDATE(),
+    MetricName VARCHAR(100) NOT NULL,
+    MetricValue NUMERIC(15,2),
+    Unit VARCHAR(50),
+    Notes VARCHAR(MAX)
+);
+
+-- Create index for queries
+CREATE NONCLUSTERED INDEX IDX_Baseline_Date_Metric
+ON dbo.PerformanceBaseline (CaptureDate, MetricName);
+
+-- SQL Script: Capture Baseline Metrics
+
+INSERT INTO dbo.PerformanceBaseline (MetricName, MetricValue, Unit, Notes)
+
+-- CPU Metrics
+SELECT 
+    'CPU % Processor Time',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE object_name LIKE '%Processor%' 
+     AND counter_name = '% Processor Time'
+     AND instance_name = '_Total') / 100.0,
+    'Percentage',
+    'Overall CPU utilization'
+UNION ALL
+SELECT 
+    'Batch Requests/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE object_name LIKE '%SQL Statistics%' 
+     AND counter_name = 'Batch Requests/sec'),
+    'Requests/sec',
+    'Query workload intensity'
+UNION ALL
+SELECT 
+    'Compilations/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE object_name LIKE '%SQL Statistics%' 
+     AND counter_name = 'SQL Compilations/sec'),
+    'Compilations/sec',
+    'Plan cache efficiency'
+
+-- Memory Metrics
+UNION ALL
+SELECT 
+    'Total Server Memory (MB)',
+    (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Total Server Memory (KB)'),
+    'MB',
+    'Current allocated memory'
+UNION ALL
+SELECT 
+    'Free Memory (MB)',
+    (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Free Memory (KB)'),
+    'MB',
+    'Available physical memory'
+UNION ALL
+SELECT 
+    'Page Life Expectancy',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Page life expectancy'),
+    'Seconds',
+    'Time page stays in buffer (>300 good)'
+
+-- I/O Metrics
+UNION ALL
+SELECT 
+    'Physical Reads/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Physical Reads/sec'),
+    'Reads/sec',
+    'Disk read rate'
+UNION ALL
+SELECT 
+    'Physical Writes/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Physical Writes/sec'),
+    'Writes/sec',
+    'Disk write rate'
+UNION ALL
+SELECT 
+    'Logical Reads/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Logical Reads/sec'),
+    'Reads/sec',
+    'Page requests from cache + disk'
+
+-- Database Size
+UNION ALL
+SELECT 
+    'Total Database Size (MB)',
+    CAST(SUM(size * 8.0 / 1024) AS NUMERIC(15,2)),
+    'MB',
+    'All database files combined'
+FROM sys.master_files
+WHERE database_id = DB_ID('SampleDB');
+
+-- View baseline captures
+SELECT 
+    CaptureDate,
+    MetricName,
+    MetricValue AS [Value],
+    Unit
+FROM dbo.PerformanceBaseline
+ORDER BY CaptureDate DESC, MetricName;
+
+-- SQL Script: Baseline Trending Analysis
+
+-- View metrics over time
+SELECT 
+    MetricName,
+    MIN(MetricValue) AS [Min],
+    AVG(MetricValue) AS [Average],
+    MAX(MetricValue) AS [Max],
+    COUNT(*) AS [Samples]
+FROM dbo.PerformanceBaseline
+WHERE CaptureDate > DATEADD(DAY, -7, GETDATE())
+GROUP BY MetricName
+ORDER BY MetricName;
+
+-- Monthly database growth
+SELECT 
+    DATETRUNC(MONTH, CaptureDate) AS [Month],
+    MAX(MetricValue) AS [Max Size (MB)],
+    AVG(MetricValue) AS [Avg Size (MB)]
+FROM dbo.PerformanceBaseline
+WHERE MetricName = 'Total Database Size (MB)'
+GROUP BY DATETRUNC(MONTH, CaptureDate)
+ORDER BY DATETRUNC(MONTH, CaptureDate) DESC;
+
+-- Calculate growth rate (weekly)
+DECLARE @WeeklyGrowth NUMERIC(10,2);
+
+SELECT 
+    @WeeklyGrowth = AVG(size_diff)
+FROM (
+    SELECT 
+        DATEPART(WEEK, CaptureDate) AS [Week],
+        MAX(MetricValue) - MIN(MetricValue) AS size_diff
+    FROM dbo.PerformanceBaseline
+    WHERE MetricName = 'Total Database Size (MB)'
+    GROUP BY DATEPART(WEEK, CaptureDate)
+) AS subquery;
+
+SELECT 
+    'Weekly Growth (MB)' AS [Metric],
+    @WeeklyGrowth AS [Value]
+UNION ALL
+SELECT 
+    'Monthly Projection (MB)',
+    @WeeklyGrowth * 4.33
+UNION ALL
+SELECT 
+    'Annual Projection (MB)',
+    @WeeklyGrowth * 52;
+
+================================================================================
+SECTION 2: REAL-TIME PERFORMANCE METRICS QUERIES
+================================================================================
+
+-- SQL Script: CPU Utilization
+
+SELECT 
+    'CPU % Processor Time' AS [Metric],
+    CAST(
+        (SELECT cntr_value FROM sys.dm_os_performance_counters 
+         WHERE object_name LIKE '%Processor%' 
+         AND counter_name = '% Processor Time'
+         AND instance_name = '_Total') / 100.0 AS NUMERIC(5,2)
+    ) AS [Value (%)]
+UNION ALL
+SELECT 
+    'SQL Batch Requests/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE object_name LIKE '%SQL Statistics%' 
+     AND counter_name = 'Batch Requests/sec')
+UNION ALL
+SELECT 
+    'SQL Compilations/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE object_name LIKE '%SQL Statistics%' 
+     AND counter_name = 'SQL Compilations/sec')
+UNION ALL
+SELECT 
+    'User Connections',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'User Connections');
+
+-- SQL Script: Memory Utilization
+
+SELECT 
+    'Total Server Memory (MB)' AS [Metric],
+    CAST(
+        (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+         WHERE counter_name = 'Total Server Memory (KB)') AS NUMERIC(10,2)
+    ) AS [Value],
+    (SELECT value_in_use FROM sys.configurations WHERE name = 'max server memory (MB)') AS [Max Configured (MB)]
+UNION ALL
+SELECT 
+    'Free Memory (MB)',
+    CAST(
+        (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+         WHERE counter_name = 'Free Memory (KB)') AS NUMERIC(10,2)
+    ),
+    NULL
+UNION ALL
+SELECT 
+    'Page Life Expectancy (sec)',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Page life expectancy'),
+    300  -- Healthy threshold
+UNION ALL
+SELECT 
+    'Pages/sec (paging)',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Pages/sec'),
+    10  -- Healthy threshold
+UNION ALL
+SELECT 
+    'Buffer Hit Ratio (%)',
+    CAST(
+        100.0 * (1 - (
+            (SELECT cntr_value FROM sys.dm_os_performance_counters 
+             WHERE counter_name = 'Physical Reads/sec') /
+            ((SELECT cntr_value FROM sys.dm_os_performance_counters 
+              WHERE counter_name = 'Batch Requests/sec') + 0.0001)
+        )) AS NUMERIC(5,2)
+    ),
+    99;
+
+-- SQL Script: I/O Performance
+
+SELECT 
+    'Physical Reads/sec' AS [Metric],
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Physical Reads/sec') AS [Value]
+UNION ALL
+SELECT 
+    'Physical Writes/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Physical Writes/sec')
+UNION ALL
+SELECT 
+    'Logical Reads/sec',
+    (SELECT cntr_value FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Logical Reads/sec');
+
+-- SQL Script: Database File Statistics
+
+SELECT 
+    DB_NAME(mf.database_id) AS [Database],
+    mf.name AS [File Name],
+    mf.type_desc,
+    mf.size * 8 / 1024 AS [Size (MB)],
+    CAST(FILEPROPERTY(mf.name, 'SpaceUsed') * 8 / 1024.0 AS NUMERIC(10,2)) AS [Used (MB)],
+    CAST((mf.size - FILEPROPERTY(mf.name, 'SpaceUsed')) * 8 / 1024.0 AS NUMERIC(10,2)) AS [Free (MB)],
+    CAST(100.0 * FILEPROPERTY(mf.name, 'SpaceUsed') / mf.size AS NUMERIC(5,2)) AS [% Used]
+FROM sys.master_files mf
+WHERE mf.database_id = DB_ID('SampleDB')
+ORDER BY mf.database_id, mf.file_id;
+
+================================================================================
+SECTION 3: DYNAMIC MANAGEMENT VIEW QUERIES
+================================================================================
+
+-- SQL Script: Top Resource-Consuming Queries
+
+SELECT TOP 10
+    RANK() OVER (ORDER BY total_worker_time DESC) AS [Rank],
+    DB_NAME(qt.dbid) AS [Database],
+    total_worker_time / 1000 / 1000 AS [CPU Time (sec)],
+    total_elapsed_time / 1000 / 1000 AS [Total Duration (sec)],
+    execution_count,
+    total_logical_reads,
+    total_physical_reads,
+    total_writes,
+    CAST(total_worker_time / 1000.0 / execution_count AS NUMERIC(10,2)) AS [Avg CPU/Execution (ms)],
+    SUBSTRING(qt.text, 1, 100) AS [Query Text],
+    qs.creation_time,
+    qs.last_execution_time
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+WHERE qt.dbid = DB_ID('SampleDB')
+ORDER BY qs.total_worker_time DESC;
+
+-- SQL Script: Currently Executing Requests
+
+SELECT 
+    r.session_id,
+    r.status,
+    r.command,
+    r.cpu_time / 1000 AS [CPU (ms)],
+    r.total_elapsed_time / 1000 AS [Elapsed (ms)],
+    r.reads,
+    r.writes,
+    r.logical_reads,
+    SUBSTRING(t.text, r.statement_start_offset / 2, 
+        (CASE WHEN r.statement_end_offset = -1 
+              THEN DATALENGTH(t.text) 
+              ELSE r.statement_end_offset 
+         END - r.statement_start_offset) / 2) AS [Current Statement]
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.session_id > 50
+ORDER BY r.cpu_time DESC;
+
+-- SQL Script: Active Sessions
+
+SELECT 
+    s.session_id,
+    s.login_name,
+    s.host_name,
+    DB_NAME(s.database_id) AS [Database],
+    s.status,
+    s.cpu_time / 1000 AS [CPU (ms)],
+    s.memory_usage * 8 / 1024 AS [Memory (MB)],
+    s.total_scheduled_time / 1000 AS [Scheduled (ms)],
+    s.total_elapsed_time / 1000 AS [Elapsed (ms)]
+FROM sys.dm_exec_sessions s
+WHERE s.session_id > 50
+ORDER BY s.cpu_time DESC;
+
+-- SQL Script: Memory Usage by Component
+
+SELECT TOP 15
+    CASE type 
+        WHEN 'MEMORYCLERK_SQLBUFFERPOOL' THEN 'Buffer Pool'
+        WHEN 'MEMORYCLERK_SQLOPTIMIZER' THEN 'Optimizer'
+        WHEN 'MEMORYCLERK_SQLEXECUTION' THEN 'Execution'
+        WHEN 'MEMORYCLERK_LOCK' THEN 'Lock Manager'
+        WHEN 'MEMORYCLERK_REPLICATION' THEN 'Replication'
+        WHEN 'MEMORYCLERK_FTINDEX' THEN 'Full-Text Index'
+        WHEN 'MEMORYCLERK_XP' THEN 'Extended Procedures'
+        WHEN 'MEMORYCLERK_APPSPECIFIC' THEN 'Application Specific'
+        ELSE type 
+    END AS [Memory Component],
+    SUM(pages_kb) / 1024 AS [Allocated (MB)],
+    SUM(pages_in_use_kb) / 1024 AS [In Use (MB)],
+    SUM(pages_free_kb) / 1024 AS [Free (MB)],
+    COUNT(*) AS [Number of Clerks]
+FROM sys.dm_os_memory_clerks
+GROUP BY type
+ORDER BY SUM(pages_kb) DESC;
+
+-- SQL Script: Database Usage by Filegroup
+
+SELECT 
+    fg.name AS [Filegroup],
+    SUM(mf.size * 8 / 1024 / 1024) AS [Total Size (GB)],
+    COUNT(DISTINCT mf.file_id) AS [Number of Files]
+FROM sys.filegroups fg
+LEFT JOIN sys.master_files mf ON fg.data_space_id = mf.data_space_id
+    AND mf.database_id = DB_ID('SampleDB')
+WHERE fg.database_id = DB_ID('SampleDB')
+GROUP BY fg.name
+ORDER BY SUM(mf.size) DESC;
+
+-- SQL Script: Index Usage Statistics
+
+SELECT 
+    OBJECT_NAME(ius.object_id) AS [Table],
+    i.name AS [Index],
+    ius.user_seeks,
+    ius.user_scans,
+    ius.user_lookups,
+    ius.user_updates,
+    ius.user_seeks + ius.user_scans + ius.user_lookups AS [Total Reads],
+    ius.last_user_seek,
+    ius.last_user_scan,
+    CASE 
+        WHEN ius.user_seeks + ius.user_scans + ius.user_lookups = 0 THEN 'Unused'
+        WHEN ius.user_updates > (ius.user_seeks + ius.user_scans + ius.user_lookups) * 10 THEN 'High Maintenance'
+        ELSE 'Healthy'
+    END AS [Status]
+FROM sys.dm_db_index_usage_stats ius
+JOIN sys.indexes i ON ius.object_id = i.object_id 
+    AND ius.index_id = i.index_id
+WHERE ius.database_id = DB_ID('SampleDB')
+    AND i.name IS NOT NULL
+ORDER BY ius.user_seeks + ius.user_scans + ius.user_lookups DESC;
+
+-- SQL Script: Missing Indexes
+
+SELECT TOP 20
+    CONVERT(DECIMAL(18,2), 
+        (migs.user_seeks + migs.user_scans + migs.user_lookups) * migs.avg_total_user_cost * migs.avg_user_impact) 
+        AS [Improvement Measure],
+    mid.equality_columns,
+    mid.included_columns,
+    migs.user_seeks,
+    migs.user_scans,
+    migs.user_lookups,
+    migs.avg_user_impact,
+    migs.user_updates,
+    'CREATE NONCLUSTERED INDEX IDX_' + 
+        REPLACE(REPLACE(mid.equality_columns, ', ', '_'), '[', '') +
+        ' ON ' + mid.statement + ' (' + mid.equality_columns + ')' +
+        CASE WHEN mid.included_columns IS NOT NULL 
+             THEN ' INCLUDE (' + mid.included_columns + ')'
+             ELSE ''
+        END + ';' AS [Create Index Script]
+FROM sys.dm_db_missing_index_details mid
+JOIN sys.dm_db_missing_index_groups mig ON mid.index_handle = mig.index_handle
+JOIN sys.dm_db_missing_index_groups_stats migs ON mig.index_group_id = migs.index_group_id
+WHERE mid.database_id = DB_ID('SampleDB')
+    AND migs.user_seeks + migs.user_scans + migs.user_lookups > 10
+ORDER BY 
+    (migs.user_seeks + migs.user_scans + migs.user_lookups) * migs.avg_total_user_cost * migs.avg_user_impact DESC;
+
+================================================================================
+SECTION 4: WAIT STATISTICS ANALYSIS
+================================================================================
+
+-- SQL Script: Top Wait Types
+
+SELECT TOP 20
+    wait_type,
+    CAST(100.0 * wait_time_ms / SUM(wait_time_ms) OVER () AS NUMERIC(5,2)) AS [% of Total Waits],
+    waiting_tasks_count,
+    wait_time_ms,
+    max_wait_time_ms,
+    signal_wait_time_ms,
+    wait_time_ms - signal_wait_time_ms AS [Resource Wait (ms)]
+FROM sys.dm_os_wait_stats
+WHERE wait_type NOT IN (
+    'CLR_SEMAPHORE', 'LAZYWRITER_SLEEP', 'RESOURCE_QUEUE',
+    'SLEEP_TASK', 'SLEEP_SYSTEMTASK', 'SQLTRACE_BUFFER_FLUSH',
+    'WAITFOR', 'LOGMGR_QUEUE', 'CHECKPOINT_QUEUE', 'BROKER_TASK_STOP',
+    'CLR_MANUAL_EVENT', 'TRACEWRITE', 'KSOURCE_WAKEUP', 'DISPATCHER_QUEUE_SEMAPHORE'
+)
+ORDER BY wait_time_ms DESC;
+
+-- SQL Script: Diagnostic Wait Statistics (Detailed)
+
+SELECT 
+    wait_type,
+    waiting_tasks_count AS [Waiting Tasks],
+    wait_time_ms AS [Wait Time (ms)],
+    signal_wait_time_ms AS [Signal Time (ms)],
+    wait_time_ms - signal_wait_time_ms AS [Resource Wait (ms)],
+    CAST(100.0 * (wait_time_ms - signal_wait_time_ms) / wait_time_ms AS NUMERIC(5,2)) AS [% Resource Wait],
+    CASE 
+        WHEN wait_type LIKE 'CXPACKET' THEN 'Parallelism'
+        WHEN wait_type LIKE 'IO_%' THEN 'I/O'
+        WHEN wait_type LIKE 'LCK_%' THEN 'Locking'
+        WHEN wait_type LIKE 'LATCH_%' THEN 'Latching'
+        WHEN wait_type LIKE 'PAGEIO_%' THEN 'Page I/O'
+        WHEN wait_type LIKE 'PAGELATCH_%' THEN 'Page Latches'
+        WHEN wait_type LIKE 'RESOURCE%' THEN 'Memory'
+        WHEN wait_type LIKE 'LOG%' THEN 'Logging'
+        ELSE 'Other'
+    END AS [Wait Category]
+FROM sys.dm_os_wait_stats
+WHERE wait_time_ms > 0
+ORDER BY wait_time_ms DESC;
+
+-- SQL Script: Reset Wait Statistics (Use Carefully)
+
+-- DBCC SQLPERF('sys.dm_os_wait_stats', CLEAR);
+
+================================================================================
+SECTION 5: BLOCKING AND LOCK DETECTION
+================================================================================
+
+-- SQL Script: Detect Current Blocking
+
+SELECT 
+    GETDATE() AS [Check Time],
+    blocking_session_id,
+    session_id,
+    status,
+    wait_duration_ms,
+    last_wait_type,
+    SUBSTRING(t.text, r.statement_start_offset / 2, 
+        (CASE WHEN r.statement_end_offset = -1 
+              THEN DATALENGTH(t.text) 
+              ELSE r.statement_end_offset 
+         END - r.statement_start_offset) / 2) AS [Blocked Query]
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE blocking_session_id > 0
+ORDER BY blocking_session_id;
+
+-- SQL Script: Detailed Blocking Chain
+
+SELECT 
+    b.session_id AS [Blocking SID],
+    (SELECT login_name FROM sys.dm_exec_sessions WHERE session_id = b.session_id) AS [Blocking User],
+    (SELECT host_name FROM sys.dm_exec_sessions WHERE session_id = b.session_id) AS [Blocking Host],
+    SUBSTRING(st_b.text, 1, 80) AS [Blocking Query],
+    b.status AS [Blocking Status],
+    b.cpu_time / 1000 AS [Blocking CPU (ms)],
+    b.total_elapsed_time / 1000 AS [Blocking Duration (ms)],
+    '' AS [---],
+    w.session_id AS [Waiting SID],
+    (SELECT login_name FROM sys.dm_exec_sessions WHERE session_id = w.session_id) AS [Waiting User],
+    (SELECT host_name FROM sys.dm_exec_sessions WHERE session_id = w.session_id) AS [Waiting Host],
+    SUBSTRING(st_w.text, 1, 80) AS [Waiting Query],
+    w.status AS [Waiting Status],
+    w.wait_duration_ms AS [Wait Time (ms)],
+    w.last_wait_type
+FROM sys.dm_exec_requests b
+INNER JOIN sys.dm_exec_requests w ON b.session_id = w.blocking_session_id
+CROSS APPLY sys.dm_exec_sql_text(b.sql_handle) st_b
+CROSS APPLY sys.dm_exec_sql_text(w.sql_handle) st_w;
+
+-- SQL Script: Kill Blocking Session (Use Carefully)
+
+/*
+IMPORTANT: Only execute after verifying the blocking session
+
+STEPS:
+1. Run blocking detection query above
+2. Identify blocking_session_id
+3. Verify it's safe to kill
+4. Execute kill command
+5. Verify waiting sessions are released
+*/
+
+-- Example: Kill session 52
+-- DECLARE @BlockingSID INT = 52;
+-- KILL @BlockingSID;
+
+-- Verify session is terminated
+-- SELECT * FROM sys.dm_exec_sessions WHERE session_id = @BlockingSID;
+
+================================================================================
+SECTION 6: EXTENDED EVENTS SETUP AND QUERIES
+================================================================================
+
+-- SQL Script: Create Extended Event Session for Slow Queries
+
+CREATE EVENT SESSION [SlowQueries] ON SERVER
+ADD EVENT sqlserver.sql_statement_completed
+(
+    ACTION 
+    (
+        sqlserver.database_id, 
+        sqlserver.session_id, 
+        sqlserver.client_hostname,
+        sqlserver.login_name
+    )
+    WHERE 
+        duration > 1000000  -- 1 second in microseconds
+        AND database_id = DB_ID('SampleDB')
+)
+ADD TARGET package0.event_file
+(
+    SET filename = N'C:\XEvents\SlowQueries.xel',
+    metadatafile = N'C:\XEvents\SlowQueries.xem'
+),
+ADD TARGET package0.ring_buffer
+(
+    SET max_memory = 4096
+)
+WITH
+(
+    MAX_MEMORY = 4MB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    STARTUP_STATE = OFF
+);
+
+-- Start the session
+ALTER EVENT SESSION [SlowQueries] ON SERVER STATE = START;
+
+-- Check if running
+SELECT 
+    name,
+    state_desc,
+    creation_time
+FROM sys.dm_xe_sessions
+WHERE name = 'SlowQueries';
+
+-- SQL Script: Create Extended Event Session for Deadlocks
+
+CREATE EVENT SESSION [DeadlockCapture] ON SERVER
+ADD EVENT sqlserver.database_xml_deadlock_report
+(
+    ACTION (sqlserver.database_id, sqlserver.session_id)
+),
+ADD EVENT sqlserver.locks_deadlock_chain
+(
+    ACTION (sqlserver.database_id, sqlserver.session_id, sqlserver.client_hostname)
+)
+ADD TARGET package0.event_file
+(
+    SET filename = N'C:\XEvents\DeadlockCapture.xel',
+    metadatafile = N'C:\XEvents\DeadlockCapture.xem'
+),
+ADD TARGET package0.ring_buffer
+(
+    SET max_memory = 4096
+)
+WITH
+(
+    MAX_MEMORY = 4MB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    STARTUP_STATE = OFF
+);
+
+-- Start deadlock capture
+ALTER EVENT SESSION [DeadlockCapture] ON SERVER STATE = START;
+
+-- SQL Script: Create Extended Event Session for Errors
+
+CREATE EVENT SESSION [ErrorTracking] ON SERVER
+ADD EVENT sqlserver.error_reported
+(
+    WHERE severity >= 10
+)
+ADD EVENT sqlserver.timeout_deadlock
+(
+    WHERE severity >= 10
+)
+ADD TARGET package0.event_file
+(
+    SET filename = N'C:\XEvents\ErrorTracking.xel'
+)
+ADD TARGET package0.ring_buffer
+(
+    SET max_memory = 4096
+)
+WITH
+(
+    MAX_MEMORY = 4MB,
+    STARTUP_STATE = OFF
+);
+
+-- Start error tracking
+ALTER EVENT SESSION [ErrorTracking] ON SERVER STATE = START;
+
+-- SQL Script: Query Extended Events
+
+-- Stop session first (or query while running)
+-- ALTER EVENT SESSION [SlowQueries] ON SERVER STATE = STOP;
+
+-- Read slow query events
+SELECT 
+    CAST(event_data AS XML) AS event_xml
+FROM sys.fn_xe_file_target_read_file
+(
+    N'C:\XEvents\SlowQueries*.xel',
+    N'C:\XEvents\SlowQueries*.xem',
+    NULL,
+    NULL
+)
+WHERE CAST(event_data AS XML).value('(event/@timestamp)[1]', 'DATETIME2') 
+    > DATEADD(HOUR, -1, GETDATE());
+
+-- Parse XEvent data into readable format
+WITH cte_events AS
+(
+    SELECT 
+        CAST(event_data AS XML) AS event_xml
+    FROM sys.fn_xe_file_target_read_file
+    (
+        N'C:\XEvents\SlowQueries*.xel',
+        N'C:\XEvents\SlowQueries*.xem',
+        NULL,
+        NULL
+    )
+)
+SELECT 
+    event_xml.value('(event/@timestamp)[1]', 'DATETIME2') AS [Event Time],
+    event_xml.value('(event/action[@name="session_id"]/value)[1]', 'INT') AS [Session ID],
+    event_xml.value('(event/action[@name="login_name"]/value)[1]', 'VARCHAR(100)') AS [Login],
+    event_xml.value('(event/action[@name="client_hostname"]/value)[1]', 'VARCHAR(100)') AS [Host],
+    event_xml.value('(event/data[@name="duration"]/value)[1]', 'BIGINT') / 1000000.0 AS [Duration (sec)],
+    event_xml.value('(event/data[@name="cpu_time"]/value)[1]', 'BIGINT') / 1000000.0 AS [CPU (sec)],
+    event_xml.value('(event/data[@name="logical_reads"]/value)[1]', 'BIGINT') AS [Logical Reads],
+    event_xml.value('(event/data[@name="physical_reads"]/value)[1]', 'BIGINT') AS [Physical Reads],
+    event_xml.value('(event/data[@name="writes"]/value)[1]', 'BIGINT') AS [Writes],
+    event_xml.value('(event/data[@name="statement"]/value)[1]', 'VARCHAR(MAX)') AS [Query]
+FROM cte_events
+ORDER BY event_xml.value('(event/@timestamp)[1]', 'DATETIME2') DESC;
+
+-- SQL Script: Stop and Drop Extended Event Sessions
+
+-- Stop sessions
+ALTER EVENT SESSION [SlowQueries] ON SERVER STATE = STOP;
+ALTER EVENT SESSION [DeadlockCapture] ON SERVER STATE = STOP;
+ALTER EVENT SESSION [ErrorTracking] ON SERVER STATE = STOP;
+
+-- Drop sessions (only after stopping)
+-- DROP EVENT SESSION [SlowQueries] ON SERVER;
+-- DROP EVENT SESSION [DeadlockCapture] ON SERVER;
+-- DROP EVENT SESSION [ErrorTracking] ON SERVER;
+
+================================================================================
+SECTION 7: TROUBLESHOOTING PROCEDURES
+================================================================================
+
+-- SQL Script: Comprehensive Troubleshooting Stored Procedure
+
+USE master;
+
+CREATE OR ALTER PROCEDURE sp_DiagnosticReport
+    @DatabaseName VARCHAR(128) = 'SampleDB',
+    @IncludeQueries BIT = 1,
+    @IncludeWaits BIT = 1,
+    @IncludeBlocking BIT = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    PRINT '=== SQL SERVER DIAGNOSTIC REPORT ===' + CHAR(10);
+    PRINT 'Generated: ' + CONVERT(VARCHAR, GETDATE(), 121) + CHAR(10);
+    
+    -- SECTION 1: System Health
+    PRINT CHAR(10) + '=== SYSTEM HEALTH ===' + CHAR(10);
+    
+    SELECT 
+        'CPU % Processor Time' AS [Metric],
+        CAST((SELECT cntr_value FROM sys.dm_os_performance_counters 
+             WHERE object_name LIKE '%Processor%' 
+             AND counter_name = '% Processor Time'
+             AND instance_name = '_Total') / 100.0 AS NUMERIC(5,2)) AS [Value (%)]
+    UNION ALL
+    SELECT 
+        'Free Memory (MB)',
+        CAST((SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+              WHERE counter_name = 'Free Memory (KB)') AS NUMERIC(10,2))
+    UNION ALL
+    SELECT 
+        'Page Life Expectancy (sec)',
+        (SELECT cntr_value FROM sys.dm_os_performance_counters 
+         WHERE counter_name = 'Page life expectancy');
+    
+    -- SECTION 2: Active Sessions
+    PRINT CHAR(10) + '=== ACTIVE SESSIONS ===' + CHAR(10);
+    
+    SELECT 
+        session_id,
+        login_name,
+        status,
+        cpu_time / 1000 AS [CPU (ms)],
+        memory_usage * 8 / 1024 AS [Memory (MB)]
+    FROM sys.dm_exec_sessions
+    WHERE session_id > 50
+    ORDER BY cpu_time DESC;
+    
+    -- SECTION 3: Blocking (if requested)
+    IF @IncludeBlocking = 1
+    BEGIN
+        PRINT CHAR(10) + '=== BLOCKING SESSIONS ===' + CHAR(10);
+        
+        SELECT 
+            blocking_session_id,
+            session_id,
+            wait_duration_ms
+        FROM sys.dm_exec_requests
+        WHERE blocking_session_id > 0;
+    END
+    
+    -- SECTION 4: Top Queries (if requested)
+    IF @IncludeQueries = 1
+    BEGIN
+        PRINT CHAR(10) + '=== TOP RESOURCE QUERIES ===' + CHAR(10);
+        
+        SELECT TOP 10
+            execution_count,
+            total_worker_time / 1000 / 1000 AS [CPU (sec)],
+            total_elapsed_time / 1000 / 1000 AS [Elapsed (sec)],
+            total_logical_reads,
+            SUBSTRING(qt.text, 1, 100) AS [Query]
+        FROM sys.dm_exec_query_stats qs
+        CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+        WHERE qt.dbid = DB_ID(@DatabaseName)
+        ORDER BY qs.total_worker_time DESC;
+    END
+    
+    -- SECTION 5: Wait Statistics (if requested)
+    IF @IncludeWaits = 1
+    BEGIN
+        PRINT CHAR(10) + '=== TOP WAIT TYPES ===' + CHAR(10);
+        
+        SELECT TOP 10
+            wait_type,
+            CAST(100.0 * wait_time_ms / SUM(wait_time_ms) OVER () AS NUMERIC(5,2)) AS [% Total],
+            waiting_tasks_count
+        FROM sys.dm_os_wait_stats
+        WHERE wait_type NOT IN (
+            'CLR_SEMAPHORE', 'LAZYWRITER_SLEEP', 'RESOURCE_QUEUE',
+            'SLEEP_TASK', 'SLEEP_SYSTEMTASK', 'SQLTRACE_BUFFER_FLUSH'
+        )
+        ORDER BY wait_time_ms DESC;
+    END
+    
+    PRINT CHAR(10) + '=== END OF REPORT ===' + CHAR(10);
+END;
+
+-- Usage:
+-- EXEC sp_DiagnosticReport @DatabaseName = 'SampleDB', @IncludeQueries = 1, @IncludeWaits = 1, @IncludeBlocking = 1;
+
+-- SQL Script: Session Activity Monitoring Procedure
+
+CREATE OR ALTER PROCEDURE sp_SessionActivity
+    @ShowAll BIT = 0
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    SELECT 
+        s.session_id,
+        s.login_name,
+        s.host_name,
+        DB_NAME(s.database_id) AS [Database],
+        s.status,
+        SUBSTRING(t.text, 1, 80) AS [Query],
+        r.cpu_time / 1000 AS [CPU (ms)],
+        r.total_elapsed_time / 1000 AS [Elapsed (ms)],
+        r.reads,
+        r.logical_reads,
+        r.writes,
+        s.last_request_start_time,
+        s.last_request_end_time
+    FROM sys.dm_exec_sessions s
+    LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
+    LEFT JOIN sys.dm_exec_sql_text(r.sql_handle) t ON 1=1
+    WHERE (@ShowAll = 1 OR s.session_id > 50)
+        AND (@ShowAll = 1 OR r.sql_handle IS NOT NULL)
+    ORDER BY r.cpu_time DESC;
+END;
+
+-- Usage:
+-- EXEC sp_SessionActivity @ShowAll = 0;
+
+================================================================================
+SECTION 8: QUERY STORE MONITORING
+================================================================================
+
+-- SQL Script: Enable Query Store
+
+USE SampleDB;
+
+ALTER DATABASE SampleDB SET QUERY_STORE = ON;
+
+-- Verify Query Store
+SELECT 
+    name,
+    is_query_store_on,
+    query_store_retention_days,
+    query_store_size_limit_mb
+FROM sys.databases
+WHERE name = 'SampleDB';
+
+-- SQL Script: Query Store - Top Resource Consuming Queries
+
+SELECT TOP 20
+    q.query_id,
+    q.object_name,
+    qt.query_text,
+    rs.avg_cpu_time / 1000.0 AS [Avg CPU (ms)],
+    rs.avg_elapsed_time / 1000.0 AS [Avg Duration (ms)],
+    rs.execution_count,
+    rs.avg_logical_io_reads,
+    rs.avg_physical_io_reads
+FROM sys.query_store_query q
+JOIN sys.query_store_query_text qt ON q.query_text_id = qt.query_text_id
+JOIN sys.query_store_runtime_stats rs ON q.query_id = rs.query_id
+ORDER BY rs.avg_cpu_time DESC;
+
+-- SQL Script: Query Store - Identify Plan Regressions
+
+SELECT 
+    q.query_id,
+    q.object_name,
+    COUNT(DISTINCT p.plan_id) AS [Number of Plans],
+    MAX(rs.avg_cpu_time) AS [Max CPU (ms)],
+    MIN(rs.avg_cpu_time) AS [Min CPU (ms)]
+FROM sys.query_store_query q
+JOIN sys.query_store_plan p ON q.query_id = p.query_id
+JOIN sys.query_store_runtime_stats rs ON p.plan_id = rs.plan_id
+GROUP BY q.query_id, q.object_name
+HAVING COUNT(DISTINCT p.plan_id) > 1
+ORDER BY MAX(rs.avg_cpu_time) DESC;
+
+-- SQL Script: Query Store - Force Best Plan
+
+-- Example: Force plan_id 1 for query_id 5
+-- EXEC sp_query_store_force_plan @query_id = 5, @plan_id = 1;
+
+-- Unforce plan
+-- EXEC sp_query_store_unforce_plan @query_id = 5, @plan_id = 1;
+
+-- View forced plans
+SELECT 
+    q.query_id,
+    p.plan_id,
+    p.is_forced_plan
+FROM sys.query_store_query q
+JOIN sys.query_store_plan p ON q.query_id = p.query_id
+WHERE p.is_forced_plan = 1;
+
+================================================================================
+SECTION 9: QUICK REFERENCE COMMANDS
+================================================================================
+
+-- Get server version
+SELECT @@VERSION;
+
+-- Get SQL Server configuration
+EXEC sp_configure;
+
+-- Get database list
+SELECT name, database_id, state_desc FROM sys.databases;
+
+-- Get current connections
+SELECT * FROM sys.dm_exec_sessions WHERE session_id > 50;
+
+-- Get running queries
+SELECT * FROM sys.dm_exec_requests WHERE session_id > 50;
+
+-- Get wait stats (top 10)
+SELECT TOP 10 * FROM sys.dm_os_wait_stats ORDER BY wait_time_ms DESC;
+
+-- Get performance counter values
+SELECT * FROM sys.dm_os_performance_counters WHERE counter_name IN (
+    'Total Server Memory (KB)', 'Free Memory (KB)', 'Batch Requests/sec'
+);
+
+-- Get database files
+SELECT * FROM sys.master_files WHERE database_id = DB_ID('SampleDB');
+
+-- Get index usage
+SELECT * FROM sys.dm_db_index_usage_stats WHERE database_id = DB_ID('SampleDB');
+
+-- Get missing indexes
+SELECT * FROM sys.dm_db_missing_index_details WHERE database_id = DB_ID('SampleDB');
+
+-- Clear plan cache (careful!)
+-- DBCC FREEPROCCACHE;
+
+-- Clear wait stats (careful!)
+-- DBCC SQLPERF('sys.dm_os_wait_stats', CLEAR);
+
+================================================================================
+END OF DAY 2 CODES
+================================================================================
+
+COMMONLY USED COMMANDS SUMMARY:
+
+Quick Status Check:
+SELECT 'CPU', (SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name = '% Processor Time' AND instance_name = '_Total') / 100.0
+UNION ALL SELECT 'Memory Free (MB)', (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters WHERE counter_name = 'Free Memory (KB)');
+
+Find Slow Queries:
+SELECT TOP 10 * FROM sys.dm_exec_query_stats ORDER BY total_elapsed_time DESC;
+
+Check Blocking:
+SELECT * FROM sys.dm_exec_requests WHERE blocking_session_id > 0;
+
+Monitor Memory:
+SELECT type, SUM(pages_kb)/1024 AS SizeMB FROM sys.dm_os_memory_clerks GROUP BY type ORDER BY SUM(pages_kb) DESC;
+
+Check Index Health:
+SELECT * FROM sys.dm_db_index_usage_stats WHERE database_id = DB_ID('SampleDB') ORDER BY user_seeks + user_scans + user_lookups DESC;
+
+================================================================================

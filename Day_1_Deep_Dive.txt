@@ -1,0 +1,1510 @@
+================================================================================
+SQL SERVER 2025 DBA TRAINING - DAY 1 DEEP DIVE
+TECHNICAL EXPLANATIONS AND ARCHITECTURE THEORY
+================================================================================
+
+TABLE OF CONTENTS
+1. SQL Server Architecture Overview
+2. SQLOS and Memory Architecture
+3. Storage Engine Deep Dive
+4. Query Processing Pipeline
+5. Instance Configuration Strategy
+6. Database Administration Best Practices
+7. Authentication and Security Model
+8. Backup and Recovery Strategies
+9. Performance Tuning Foundations
+
+================================================================================
+1. SQL SERVER ARCHITECTURE OVERVIEW
+================================================================================
+
+SQL Server 2025 follows a multi-layered architecture designed for scalability,
+reliability, and performance.
+
+ARCHITECTURE LAYERS (from top to bottom):
+
+┌─────────────────────────────────────────────────┐
+│         CLIENT APPLICATIONS                      │
+│    (SSMS, Application Code, Reporting)          │
+└─────────────────┬───────────────────────────────┘
+                  │ TCP/IP, Named Pipes
+┌─────────────────┴───────────────────────────────┐
+│     SQL SERVER RELATIONAL ENGINE                │
+│  - Query Parser, Compiler, Optimizer            │
+│  - Execution Engine                             │
+│  - Transaction Manager                          │
+└─────────────────┬───────────────────────────────┘
+                  │
+┌─────────────────┴───────────────────────────────┐
+│         BUFFER MANAGER & CACHE MANAGER          │
+│    - Memory allocation                          │
+│    - Page management                            │
+│    - Caching strategies                         │
+└─────────────────┬───────────────────────────────┘
+                  │
+┌─────────────────┴───────────────────────────────┐
+│     SQLOS (SQL SERVER OPERATING SYSTEM)         │
+│  - Memory management                            │
+│  - CPU scheduling                               │
+│  - I/O management                               │
+│  - Synchronization primitives                   │
+└─────────────────┬───────────────────────────────┘
+                  │
+┌─────────────────┴───────────────────────────────┐
+│    WINDOWS OPERATING SYSTEM SERVICES            │
+│  - Actual memory allocation (virtual memory)    │
+│  - CPU scheduling and execution                 │
+│  - I/O scheduling                               │
+└─────────────────────────────────────────────────┘
+
+KEY COMPONENTS:
+
+SQL Server Instance:
+- A running copy of SQL Server Database Engine
+- Can run multiple instances on one server
+- Each instance has its own:
+  * Memory allocation
+  * Configuration settings
+  * Login credentials
+  * Databases
+  * Services (Database Engine, SQL Agent)
+
+Default Instance: MSSQLSERVER
+Named Instance: MSSQLSERVER2, ANALYSIS, etc.
+
+Connection Format: ServerName\InstanceName
+
+================================================================================
+1.1 SQL SERVER 2025 FEATURES
+================================================================================
+
+NEW CAPABILITIES IN SQL SERVER 2025:
+
+1. INTELLIGENT QUERY PROCESSING (IQP)
+   - Cardinality Estimation: AI-driven, learns from actual data
+   - Memory Grant Feedback: Adjusts memory allocation based on execution
+   - Batch Mode on Rowstore: Executes rowstore queries in batch mode
+   - Approximate Count Distinct: Fast count estimates
+   - Table Variable Deferred Compilation: Better optimization
+
+2. PARAMETER-SENSITIVE PLAN (PSP)
+   - Detects different query behavior for different parameters
+   - Creates alternate plans for different parameter ranges
+   - Example:
+     SELECT * FROM Orders WHERE CustomerID = @CustomerID
+     Plan A: For small customer IDs (index scan)
+     Plan B: For large customer IDs (seek + sort)
+
+3. QUERY STORE ENHANCEMENTS
+   - Better plan forcing accuracy
+   - Execution time tracking
+   - Resource consumption monitoring
+   - Plan comparison and regression detection
+
+4. COMPATIBILITY LEVEL 160 FEATURES
+   - CE 160 (Cardinality Estimator 160)
+   - Memory grant feedback
+   - Optimized execution plans
+
+5. ENHANCED SECURITY
+   - Transparent Data Encryption (TDE) improvements
+   - Dynamic Data Masking enhancements
+   - Row-Level Security (RLS) performance
+
+6. PERFORMANCE MONITORING
+   - Enhanced Extended Events
+- SQL Server Management Studio improvements
+   - Query Performance Insight
+   - Execution plan analysis
+
+================================================================================
+2. SQLOS AND MEMORY ARCHITECTURE
+================================================================================
+
+SQLOS (SQL Server Operating System) is the abstraction layer between SQL Server
+and Windows Operating System. It provides:
+
+1. MEMORY MANAGEMENT
+   - Page allocation and management
+   - Buffer pool management
+   - Memory clerk tracking
+   - Virtual memory handling
+
+2. CPU SCHEDULING
+   - Thread scheduling
+   - Worker thread pool management
+   - CPU affinity settings
+
+3. I/O MANAGEMENT
+   - Asynchronous I/O operations
+   - I/O completion handling
+   - Read-ahead mechanisms
+
+4. SYNCHRONIZATION PRIMITIVES
+   - Latches (short-term synchronization)
+   - Locks (long-term synchronization)
+   - Events and critical sections
+
+MEMORY ARCHITECTURE LAYERS:
+
+Total Physical Memory (e.g., 16 GB)
+    │
+    └─→ Windows Reserved (4 GB) - OS, other apps
+    └─→ SQL Server Memory Pool (12 GB, configured by max server memory)
+        │
+        └─→ Buffer Pool (8 GB) - Largest consumer
+        │   ├─→ Data Cache (pages from disk)
+        │   ├─→ Procedure Cache (execution plans)
+        │   └─→ Log Cache (transaction logs)
+        │
+        └─→ Optimizer Memory (500 MB) - Query optimization
+        │
+        └─→ Lock Manager (Variable) - Lock structures
+        │
+        └─→ Other Clerks (Variable)
+            ├─→ Transaction Manager
+            ├─→ Replication
+            ├─→ Full-Text Search
+            └─→ Service Broker
+
+MEMORY CLERKS:
+
+A "clerk" is a memory allocation tracking unit. Each component reports its
+memory usage through a clerk.
+
+Main Clerks:
+- MEMORYCLERK_SQLBUFFERPOOL: Data and procedure cache
+- MEMORYCLERK_SQLOPTIMIZER: Query optimization
+- MEMORYCLERK_SQLEXECUTION: Query execution
+- MEMORYCLERK_LOCK: Lock structures
+- MEMORYCLERK_REPLICATION: Replication engine
+- MEMORYCLERK_FTINDEX: Full-text index
+
+Query to view memory clerks:
+SELECT type, SUM(pages_kb)/1024 AS [Size (MB)]
+FROM sys.dm_os_memory_clerks
+GROUP BY type
+ORDER BY SUM(pages_kb) DESC;
+
+BUFFER POOL MANAGEMENT:
+
+The buffer pool is the most critical memory component. It stores:
+- Data pages from tables and indexes
+- Index pages
+- Log cache pages
+
+Size typically: 60-90% of total SQL Server memory
+
+Components:
+1. Dirty Page Tracking: Pages modified but not written to disk
+2. LRU (Least Recently Used) List: Pages ordered by usage
+3. Free Buffer List: Available pages for new data
+4. Stolen Page List: Reserved for non-data purposes
+
+When memory pressure occurs:
+1. Lazy writer process kicks in
+2. Dirty pages are flushed to disk
+3. Clean pages are discarded from cache
+4. Memory is released for new pages
+
+BUFFER POOL HIT RATIO:
+
+Hit Ratio = (Logical Reads - Physical Reads) / Logical Reads
+
+Formula: (Pages found in cache / Total page requests) * 100
+
+Healthy ratio: > 99%
+Concerning: < 95%
+Crisis: < 90%
+
+Query to check:
+SELECT 
+    CAST(
+        100.0 * (1 - (
+            SELECT cntr_value FROM sys.dm_os_performance_counters 
+            WHERE counter_name = 'Page reads/sec'
+        ) / (
+            SELECT cntr_value FROM sys.dm_os_performance_counters 
+            WHERE counter_name = 'Batch Requests/sec'
+        ))
+    AS NUMERIC(5,2)) AS [Hit Ratio %];
+
+LOW HIT RATIO CAUSES:
+1. Insufficient memory allocated
+2. Queries loading too much data
+3. Memory leaks in application
+4. Large ad-hoc queries
+5. Inadequate indexes (more data reads)
+
+SOLUTIONS:
+1. Increase max server memory (if available)
+2. Optimize queries to access less data
+3. Add appropriate indexes
+4. Identify and fix memory leaks
+5. Archive old data
+
+================================================================================
+3. STORAGE ENGINE DEEP DIVE
+================================================================================
+
+The storage engine is the component that manages data persistence and retrieval.
+
+STORAGE HIERARCHY:
+
+┌─────────────────┐
+│   Pages (8 KB)  │ - Basic storage unit
+│                 │ - 8192 bytes total
+│                 │ - Header (96 bytes)
+│                 │ - Data (8096 bytes)
+└────────┬────────┘
+         │
+┌────────┴───────────┐
+│   Extents (64 KB)  │ - 8 contiguous pages
+│                    │ - Allocation unit
+│                    │ - Uniform vs Mixed
+└────────┬───────────┘
+         │
+┌────────┴────────────────┐
+│  Allocation Units (GAM) │ - Track extents
+│                         │ - Global Allocation Map
+└────────┬────────────────┘
+         │
+┌────────┴──────────────┐
+│  Data Files (.mdf)   │ - Primary file
+│  Secondary Files(.ndf) │ - Additional capacity
+│  Log Files (.ldf)     │ - Transaction log
+└───────────────────────┘
+
+PAGE STRUCTURE:
+
+Offset 0-95:    Page Header
+                - Page number
+                - Type of page
+                - Available space
+                - Object ID
+                
+Offset 96-8191: Page Data
+                - Actual records
+                - Row offset table
+
+Offset 8192:    Page Footer
+                - Checksum (for integrity)
+
+PAGE TYPES:
+
+1. Data Pages (type 1): Contains table row data
+2. Index Pages (type 2): Contains index entries
+3. Text/Image Pages (type 3): LOB data
+4. Allocation Pages (type 8-10): Track extents
+   - GAM (Global Allocation Map)
+   - SGAM (Shared Global Allocation Map)
+   - IAM (Index Allocation Map)
+5. Metadata Pages: System information
+
+DATABASE FILES:
+
+Primary File (.mdf):
+- Only file required per database
+- Contains system tables (sys tables)
+- Cannot be removed
+- Default location: SQL Server data directory
+
+Secondary Files (.ndf):
+- Optional, for capacity expansion
+- Can be placed on different disks for I/O distribution
+- Multiple secondary files for parallelism
+
+Log File (.ldf):
+- Stores transaction log
+- Sequential writes (high performance)
+- Recovery critical - essential for point-in-time recovery
+- Grows with uncommitted transactions
+
+FILEGROUPS:
+
+Logical grouping of data files for administration and performance.
+
+Primary Filegroup: Contains system tables, cannot be removed
+User-defined Filegroups: For data organization
+
+Benefits:
+1. I/O Distribution: Spread queries across multiple disks
+2. Targeted Backup: Backup specific filegroup
+3. Piecemeal Restore: Restore filegroup independently
+4. Performance: Parallel I/O from multiple disks
+
+Example structure for high-performance database:
+
+PRIMARY (system tables)
+├─ SampleDB_Primary.mdf (100 MB)
+│
+FG_OLTP (online transaction processing)
+├─ SampleDB_OLTP_1.ndf (500 MB on SSD 1)
+├─ SampleDB_OLTP_2.ndf (500 MB on SSD 2)
+│
+FG_Archive (historical data)
+└─ SampleDB_Archive_1.ndf (1000 MB on SATA drive)
+
+INSTANT FILE INITIALIZATION (IFI):
+
+Problem Without IFI:
+- When file grows, SQL Server zeros all new space
+- Growing 1 GB file can take 30+ seconds
+- Blocks other operations
+
+Solution With IFI:
+- Windows doesn't zero space
+- File grows immediately
+- Applies only to data files, NOT log files
+- Requires specific Windows permission
+
+Trade-off:
+- Benefit: Fast file growth
+- Risk: Sensitive data may persist in unallocated space
+- Solution: Use on databases without sensitive data
+
+Configuration:
+1. Run: gpedit.msc (Group Policy Editor)
+2. Navigate to: Computer Configuration > Windows Settings > Security Settings 
+               > Local Policies > User Rights Assignment
+3. Find: "Perform Volume Maintenance Tasks"
+4. Add: SQL Server service account
+5. Restart SQL Server
+
+AUTOGROWTH BEST PRACTICES:
+
+Anti-pattern: Percentage-based growth
+- Database 10 GB grows 10% = 1 GB
+- Performance hit during growth
+- Unpredictable final size
+
+Best Practice: Fixed-size growth
+- Data files: 500 MB increments
+- Log files: 100-500 MB increments
+- Predictable, consistent growth
+- Minimal performance impact
+
+Configuration:
+ALTER DATABASE [DatabaseName]
+MODIFY FILE (NAME = 'LogicalFileName', FILEGROWTH = 500MB);
+
+TRANSACTION LOG:
+
+The transaction log is critical for:
+1. Crash recovery: Redo committed transactions
+2. Rollback: Undo uncommitted transactions
+3. Backup/Recovery: Point-in-time restore
+4. Replication: Capture changes
+
+Log entries (logical records):
+- Begin transaction
+- Modify operation (before/after images)
+- Commit/Rollback
+- Checkpoint
+
+Log Sequence Number (LSN):
+- Unique identifier for each log record
+- Ordered chronologically
+- Used for recovery and synchronization
+
+Transaction Log Space Issues:
+- Log grows when active transactions exist
+- Long-running transactions prevent log truncation
+- Uncommitted data kept in log
+- Full log prevents new transactions
+
+Resolution:
+1. Identify long transactions: SELECT * FROM sys.dm_exec_sessions
+2. Check for blocking: sys.dm_exec_blocking_requests
+3. Commit/rollback transactions
+4. Monitor log space: sp_spaceused
+
+================================================================================
+4. QUERY PROCESSING PIPELINE
+================================================================================
+
+When you execute a query, SQL Server processes it through distinct stages:
+
+QUERY EXECUTION LIFECYCLE:
+
+T-SQL Query Input
+        │
+        ▼
+[1] PARSING (Syntax Check)
+    - Checks syntax validity
+    - Builds parse tree
+    - Identifies tables, columns, operators
+    Errors: "Syntax Error"
+        │
+        ▼
+[2] BINDING (Schema Validation)
+    - Validates objects exist
+    - Matches column names to tables
+    - Checks user permissions
+    - Validates data types
+    Errors: "Invalid column name", "Permission denied"
+        │
+        ▼
+[3] OPTIMIZATION (Plan Generation)
+    - Analyzes statistics
+    - Determines access methods
+    - Evaluates join strategies
+    - Estimates costs
+    Output: Execution Plan (query plan)
+        │
+        ▼
+[4] COMPILATION (Plan Caching)
+    - Compiles optimized plan
+    - Stores in plan cache
+    - Assigned plan handle
+    Reuse: Subsequent similar queries use cached plan
+        │
+        ▼
+[5] EXECUTION (Plan Execution)
+    - Execute plan step-by-step
+    - Retrieve data
+    - Sort/aggregate as needed
+    - Return result set
+        │
+        ▼
+Result Set to Client
+
+PLAN CACHE:
+
+Memory region storing compiled query plans.
+
+Benefits:
+- Execution plan reuse (skip compile)
+- Faster query execution
+- Reduced CPU usage
+
+Cache key based on:
+- Query text (exact match)
+- Database context
+- Authentication
+- Connection settings
+
+Query to view plan cache:
+SELECT 
+    usecounts,
+    objtype,
+    SUBSTRING(text, 1, 100) AS [Query]
+FROM sys.dm_exec_cached_plans
+CROSS APPLY sys.dm_exec_sql_text(plan_handle)
+ORDER BY usecounts DESC;
+
+PLAN REUSE CONDITIONS:
+
+Query 1: SELECT * FROM Orders WHERE OrderID = 1
+Query 2: SELECT * FROM Orders WHERE OrderID = 2
+Result: DIFFERENT plans (constants difference)
+
+Query 1: SELECT * FROM Orders WHERE OrderID = @OrderID (param 1)
+Query 2: SELECT * FROM Orders WHERE OrderID = @OrderID (param 2)
+Result: SAME plan (parameterized, reusable)
+
+COMPILED STATISTICS:
+
+Plan includes statistics cardinality estimates:
+- Table row count
+- Column value distribution
+- Index selectivity
+- Join selectivity
+
+Stale statistics cause:
+- Suboptimal plans
+- Poor query performance
+- Resource overuse
+
+Keep statistics current:
+UPDATE STATISTICS [TableName];
+
+PLAN OPERATORS:
+
+Common execution plan operators:
+
+1. Table Scan: Reads entire table sequentially
+   - Used when: No suitable index
+   - Cost: HIGH for large tables
+   
+2. Index Seek: Uses index to locate specific rows
+   - Used when: Good index available
+   - Cost: LOW
+   
+3. Index Scan: Reads entire index sequentially
+   - Used when: No range predicate
+   - Cost: MEDIUM
+   
+4. Nested Loop Join: For each outer row, search inner
+   - Used when: Small result sets
+   - Cost: LOW but inefficient for large joins
+   
+5. Hash Join: Build hash table of inner, probe with outer
+   - Used when: Equi-join, no suitable index
+   - Cost: MEDIUM, memory intensive
+   
+6. Merge Join: Requires sorted input, merge streams
+   - Used when: Pre-sorted data
+   - Cost: LOW for sorted input
+   
+7. Sort: Sort data by specified columns
+   - Used when: ORDER BY or GROUP BY
+   - Cost: HIGH for large datasets
+   
+8. Aggregate: GROUP BY, COUNT, SUM, etc.
+   - Cost: MEDIUM
+
+PARAMETER SNIFFING:
+
+Definition: Optimization using first-execution parameter values.
+
+Example:
+DECLARE @CustomerID INT = 1;  -- Compiles with this value
+SELECT * FROM Orders WHERE CustomerID = @CustomerID;
+
+If first run uses CustomerID=1 (1 order):
+- Plan optimized for small result set
+- Uses index seek
+
+If later run uses CustomerID=500 (10,000 orders):
+- Plan still optimized for small result set
+- Performance poor because index seek doesn't fit
+
+Solution:
+1. Use RECOMPILE: OPTION (RECOMPILE)
+2. Use OPTION (OPTIMIZE FOR @param = value)
+3. Use Forced Parameterization (trace flag)
+4. Use Query Store (SQL Server 2025)
+
+PLAN CACHE PRESSURE:
+
+If cache grows too large:
+- Reduced memory for data
+- Performance degradation
+- Increased I/O
+
+Management:
+1. Monitor cache size:
+   SELECT SUM(pages_kb)/1024 AS [Plan Cache (MB)]
+   FROM sys.dm_os_memory_clerks
+   WHERE type LIKE '%OPTIMIZER%';
+
+2. Clear cache if needed (careful!):
+   DBCC FREEPROCCACHE;
+
+3. Identify heavy queries:
+   SELECT TOP 10 * FROM sys.dm_exec_query_stats
+   ORDER BY total_elapsed_time DESC;
+
+================================================================================
+5. INSTANCE CONFIGURATION STRATEGY
+================================================================================
+
+CONFIGURATION HIERARCHY:
+
+Server-Level Settings (sp_configure)
+    └─ Affects all databases
+    └─ Examples: max server memory, MAXDOP
+
+Database-Level Settings (ALTER DATABASE)
+    └─ Database-specific
+    └─ Examples: Recovery Model, Compatibility Level
+
+Session-Level Settings (SET, OPTION)
+    └─ Connection-specific
+    └─ Examples: SET STATISTICS, OPTION (MAXDOP)
+
+Query-Level Settings (Hints)
+    └─ Query-specific
+    └─ Examples: INDEX (), NOLOCK
+
+MEMORY CONFIGURATION STRATEGY:
+
+Formula: Max Server Memory = Total RAM - 4 GB (minimum)
+
+Calculation Examples:
+
+16 GB system:
+- Reserved for OS: 4 GB
+- SQL Server: 16 - 4 = 12 GB = 12,288 MB
+
+32 GB system:
+- Reserved for OS: 4 GB
+- SQL Server: 32 - 4 = 28 GB = 28,672 MB
+
+64 GB system:
+- Reserved for OS: 4 GB
+- Reserved for apps: 2-4 GB
+- SQL Server: 64 - 8 = 56 GB
+
+Advanced configuration (if other apps on server):
+- 50% for SQL Server
+- 25% for OS and other services
+- 25% buffer
+
+WHY RESERVE MEMORY FOR OS?
+
+1. OS kernel requires memory
+2. Disk cache operations
+3. Network operations
+4. Device drivers
+5. System processes
+
+If SQL Server takes all memory:
+- OS must swap to disk
+- System becomes unstable
+- Performance degrades dramatically
+
+MAXDOP CONFIGURATION:
+
+MAXDOP = Maximum Degree of Parallelism
+Controls how many CPU cores can work on single query.
+
+Recommendation by system type:
+
+1 - 2 cores: MAXDOP = 1 (disable parallelism, overhead too high)
+4 - 8 cores: MAXDOP = number of cores
+16+ cores: MAXDOP = 8-16 (or monitor and adjust)
+Hyper-threaded: Use physical core count, not logical
+
+Example: 8-core system with hyperthreading (16 logical):
+- Set MAXDOP = 8 (physical cores)
+- Hyperthreads shared within physical core
+
+Special cases:
+- NUMA systems: Set MAXDOP = cores per NUMA node
+- Query with OPTION (MAXDOP 1): Force single-threaded
+
+Cost Threshold for Parallelism:
+
+Threshold = 50 (default is 5, usually too low)
+
+Meaning: Only parallelize if estimated cost > 50
+
+Cost = estimated seconds to execute serially
+
+Example:
+- Estimated cost: 25 seconds (< 50) = Single-threaded
+- Estimated cost: 75 seconds (> 50) = Parallel
+
+Higher threshold = Less parallelism overhead
+
+TEMPDB CONFIGURATION:
+
+TempDB is used for:
+1. Temporary tables (#temp)
+2. Table variables
+3. Sorting operations
+4. Join operations
+5. Grouping operations
+6. Hash aggregates
+
+Performance impact: HIGH
+
+Optimization:
+1. Dedicated fast disk (preferably SSD)
+2. One data file per physical core
+3. All files same size
+4. Auto-grow = fixed MB, not percentage
+
+Example: 8-core system
+- Need: 8 data files
+- Size: 500 MB each
+- Auto-grow: 100 MB fixed
+- Not on system drive
+
+Configuration steps:
+1. ALTER DATABASE tempdb ADD FILE (...) for each core
+2. Restart SQL Server (required)
+3. Verify in sys.master_files
+
+TRACE FLAGS (Advanced):
+
+Trace flags modify SQL Server behavior.
+
+Common DBA trace flags:
+
+T1117: One autogrow at a time (disable simultaneous autogrow)
+T1118: File initialization immediately (alternative to IFI)
+T2371: Lightweight statistics update (useful for large tables)
+T3226: Prevent autogrow for log file (force manual growth)
+T4199: All new optimizations on (enable latest CE features)
+
+Enable at startup:
+SQL Server Configuration Manager > Startup Parameters > -T4199
+
+Enable in session:
+DBCC TRACEON (4199);
+
+================================================================================
+6. DATABASE ADMINISTRATION BEST PRACTICES
+================================================================================
+
+DATABASE DESIGN:
+
+1. LOGICAL DESIGN
+   - Normalization: Reduce redundancy
+   - Third Normal Form (3NF) typical
+   - Identify entities and relationships
+   - Design primary and foreign keys
+
+2. PHYSICAL DESIGN
+   - File placement strategy
+   - Index design
+   - Partitioning strategy
+   - Backup strategy
+
+NAMING CONVENTIONS:
+
+Tables:
+- CamelCase or snake_case
+- Descriptive names
+- No abbreviations
+- Examples: Customer, Order, OrderDetail, CustomerOrder
+
+Columns:
+- CamelCase or snake_case
+- Type indicator optional (deprecated)
+- Examples: CustomerID, FirstName, OrderDate, TotalAmount
+
+Indexes:
+- Format: IX_[TableName]_[Columns]
+- Examples: IX_Customer_Email, IX_Order_CustomerID_Date
+
+Stored Procedures:
+- Format: sp_[Purpose]
+- Examples: sp_GetCustomer, sp_CreateOrder
+
+Views:
+- Format: vw_[Description]
+- Examples: vw_CustomerSummary, vw_MonthlySales
+
+FILEGROUP STRATEGY:
+
+1. SIMPLE SETUP (small databases)
+   - Everything on PRIMARY
+   - Simple, minimal management
+
+2. STANDARD SETUP (medium databases)
+   PRIMARY: System tables, catalog
+   FG_Data: Main table data
+   FG_Index: Indexes
+   FG_Log: Transaction log
+
+3. ADVANCED SETUP (large OLTP)
+   PRIMARY: System tables
+   FG_OLTP: Transactional data
+   FG_Analytics: Reporting data
+   FG_Archive: Historical data
+   Each on separate high-speed disk
+
+4. PARTITION SETUP (very large tables)
+   Partition by date, customer, region
+   Each partition on separate filegroup
+
+MAINTENANCE PLANNING:
+
+1. STATISTICS MAINTENANCE
+   When: After bulk loads, daily on active tables
+   How: UPDATE STATISTICS [TableName];
+   Benefit: Accurate cardinality estimates
+
+2. INDEX MAINTENANCE
+   Rebuild: Fragment > 30% (REBUILD)
+   Reorganize: Fragment 10-30% (REORGANIZE)
+   How: ALTER INDEX [IndexName] ON [TableName] REBUILD;
+
+3. INTEGRITY CHECKS
+   When: Weekly or as scheduled
+   How: DBCC CHECKDB ([DatabaseName]);
+   Risk: Can be resource-intensive on large databases
+
+4. BACKUP VERIFICATION
+   Regular: Test restore of backups
+   Benefit: Ensure backups are usable
+
+5. SPACE MONITORING
+   Monitor: Free space in databases
+   Action: Alert when threshold reached
+   Prevention: Proactive growth management
+
+PERMISSIONS MODEL:
+
+Principle: Least Privilege
+- Grant minimum permissions needed
+- Remove unnecessary permissions
+- Audit permission changes
+
+Standard roles:
+
+Server-level:
+- sysadmin: Full server admin
+- bulkadmin: Bulk import operations
+- dbcreator: Create databases
+- diskadmin: Disk management
+- public: All users (minimal)
+
+Database-level:
+- db_owner: Database admin
+- db_ddladmin: CREATE/ALTER/DROP
+- db_datareader: SELECT only
+- db_datawriter: INSERT/UPDATE/DELETE
+- db_denydatareader: Explicitly deny read
+- db_denydatawriter: Explicitly deny write
+- public: All database users
+
+Granular permissions:
+- Object-level: SELECT, INSERT, UPDATE, DELETE
+- Schema-level: EXECUTE, ALTER
+- Column-level: Restrict to specific columns
+
+Example least-privilege user:
+CREATE LOGIN [AppUser] WITH PASSWORD = '...';
+USE [Database];
+CREATE USER [AppUser] FOR LOGIN [AppUser];
+CREATE ROLE app_readonly;
+GRANT SELECT ON SCHEMA::dbo TO app_readonly;
+ALTER ROLE app_readonly ADD MEMBER [AppUser];
+
+================================================================================
+7. AUTHENTICATION AND SECURITY MODEL
+================================================================================
+
+AUTHENTICATION MODES:
+
+1. WINDOWS AUTHENTICATION ONLY
+   - Uses Windows credentials
+   - Kerberos ticket-based
+- Users authenticate to Windows domain
+   - Recommended for corporate environments
+   - No password stored in SQL Server
+
+2. MIXED MODE (Windows + SQL)
+   - Windows: Domain users
+   - SQL: Local SQL Server logins
+   - Can mix Windows and SQL users
+   - Recommended for applications/external users
+
+Comparison:
+
+Feature              | Windows | SQL Auth
+─────────────────────┼─────────┼──────────
+Security             | Stronger| Weaker
+Password stored      | No      | Yes
+Domain required      | Yes     | No
+External users       | Hard    | Easy
+Default              | Legacy  | Optional
+Enterprise standard  | Yes     | No
+
+WINDOWS LOGIN CREATION:
+
+Syntax:
+CREATE LOGIN [DOMAIN\username] FROM WINDOWS;
+CREATE LOGIN [LocalMachine\LocalUser] FROM WINDOWS;
+CREATE LOGIN [LocalMachine\GroupName] FROM WINDOWS;
+
+Best practice: Use Windows groups
+- Single login for entire department
+- Group management in Active Directory
+- Reduced administrative overhead
+
+Example:
+CREATE LOGIN [CORP\DeveloperTeam] FROM WINDOWS;
+CREATE USER [CORP\DeveloperTeam] FOR LOGIN [CORP\DeveloperTeam];
+ALTER ROLE db_datawriter ADD MEMBER [CORP\DeveloperTeam];
+
+SQL AUTHENTICATION:
+
+Syntax:
+CREATE LOGIN [LoginName] WITH PASSWORD = 'StrongPassword';
+
+Security considerations:
+1. Password policy enforcement
+2. Password expiration
+3. Failed login lockout
+4. Regular password changes
+
+Best practice configuration:
+CREATE LOGIN [AppUser]
+WITH PASSWORD = 'P@ssw0rd123456!',
+     CHECK_POLICY = ON,
+     CHECK_EXPIRATION = ON;
+
+Password requirements with CHECK_POLICY:
+- Minimum 8 characters
+- Mix of uppercase, lowercase, numbers, symbols
+- Not based on username
+- Not based on server name
+
+DATABASE USERS:
+
+User = database-level identity
+Login = server-level identity
+
+Relationship:
+- Login → Connect to server
+- User → Access database
+
+Creation:
+CREATE USER [UserName] FOR LOGIN [LoginName];
+
+Special user types:
+- Guest user: For connections without explicit login
+- Certificate-based users
+- Asymmetric key users
+
+ROLES AND PERMISSIONS:
+
+Role = Container of permissions
+
+Fixed server roles:
+- sysadmin: Full admin rights
+- bulkadmin: Bulk insert privilege
+- dbcreator: Create database privilege
+- diskadmin: Disk management privilege
+- processadmin: Kill processes privilege
+- public: Minimal, every login has this
+
+Fixed database roles:
+- db_owner: Database owner
+- db_ddladmin: DDL operations
+- db_datareader: SELECT data
+- db_datawriter: INSERT/UPDATE/DELETE
+- db_denydatareader: Explicitly block SELECT
+- db_denydatawriter: Explicitly block DML
+
+Custom roles:
+CREATE ROLE [CustomRoleName];
+GRANT SELECT, INSERT, UPDATE ON dbo.Table1 TO [CustomRoleName];
+
+DEFAULT SCHEMA:
+
+Every user has default schema.
+Default: dbo (database owner)
+
+Benefits:
+- Specify schema in queries: SELECT * FROM Schema.Table
+- Default schema used if not specified
+
+Configure:
+ALTER USER [UserName] WITH DEFAULT_SCHEMA = dbo;
+
+EXECUTE AS:
+
+Temporarily change execution context.
+
+Use cases:
+- Impersonate user to test permissions
+- Stored procedures run with owner rights
+- Application services
+
+Syntax:
+EXECUTE AS USER = 'UserName';
+-- queries run as specified user
+REVERT;
+-- return to previous user
+
+Security note: Owner-chaining
+Stored procedure owner permissions apply, not caller
+
+OWNED CHAIN:
+
+Chain: dbo (caller) → dbo.sp_Procedure → dbo.Table
+
+If all same owner (dbo):
+- Caller only needs EXECUTE on procedure
+- Procedure can access table without SELECT grant
+
+If different owners:
+- Caller needs SELECT on table too
+- Chain is "broken"
+
+Best practice:
+- Make dbo own all objects
+- Use sp_changeobjectowner to change ownership
+
+================================================================================
+8. BACKUP AND RECOVERY STRATEGIES
+================================================================================
+
+RECOVERY MODELS:
+
+Three recovery models determine transaction log behavior.
+
+1. SIMPLE RECOVERY
+
+Characteristics:
+- Transaction log truncated automatically
+- Point-in-time recovery: NOT POSSIBLE
+- Only full and differential backups
+- Log backups: NOT POSSIBLE
+- Fast recovery (no log replay)
+- Storage-efficient (small log)
+
+When to use:
+- Development/test databases
+- Non-critical databases
+- Read-only databases
+- Small databases
+
+Implications:
+- Data loss: Since last full/differential backup
+- Long recovery time: Need restore, then rerun
+- Limited options: Can't do point-in-time
+
+Configuration:
+ALTER DATABASE [DatabaseName] SET RECOVERY SIMPLE;
+
+2. BULK_LOGGED RECOVERY
+
+Characteristics:
+- Transaction log truncated after backups
+- Log backups available
+- Full, differential, and log backups
+- Bulk operations minimally logged
+- Point-in-time recovery: POSSIBLE
+- Faster bulk operations than FULL
+
+When to use:
+- Databases with bulk operations
+- Data warehouse/ETL loads
+- Temporary bulk inserts
+- Staging databases
+
+Implications:
+- Data loss: Since last log backup
+- Log recovery: Uses log backups
+- Performance: Better for bulk operations
+
+Configuration:
+ALTER DATABASE [DatabaseName] SET RECOVERY BULK_LOGGED;
+
+3. FULL RECOVERY
+
+Characteristics:
+- All transactions logged
+- Log truncation only after backup
+- Full, differential, and log backups
+- Point-in-time recovery: POSSIBLE
+- Complete audit trail
+- Larger transaction log
+
+When to use:
+- Production OLTP databases
+- Databases requiring audit trail
+- High-availability systems
+- Databases with SLA requirements
+
+Implications:
+- Data loss: Since last log backup (minutes)
+- Full audit: All changes logged
+- Log space: Can grow quickly if not backed up
+
+Configuration:
+ALTER DATABASE [DatabaseName] SET RECOVERY FULL;
+
+BACKUP TYPES:
+
+1. FULL BACKUP
+
+Definition: Complete database copy
+
+Components backed up:
+- All data pages
+- All index pages
+- System tables
+- File allocation information
+- Indexes
+- Everything needed to restore
+
+Time: Long (proportional to database size)
+Size: Equal to database size (with compression, 30-50% smaller)
+Frequency: Daily or weekly
+
+When full backup is taken:
+- Database can be restored to point of backup
+- Differential backups now available (since this full)
+- Log backups inherit from this full backup
+
+Syntax:
+BACKUP DATABASE [DatabaseName]
+TO DISK = N'C:\Backups\DB_Full_20250124.bak'
+WITH COMPRESSION, INIT, STATS = 10;
+
+Recovery: RESTORE DATABASE [DB] FROM DISK = '...'
+
+2. DIFFERENTIAL BACKUP
+
+Definition: Only changed blocks since last full backup
+
+Components backed up:
+- Only pages modified since full backup
+- Header information (faster)
+
+Time: Quick (depending on change volume)
+Size: Typically 5-30% of database
+Frequency: Daily (mid-day and before log backups)
+
+Delta Database (changed extents) tracking:
+- SQL Server tracks which extents changed
+- Differential backup scans these
+- Only changed pages included
+
+Prerequisites:
+- Full backup must exist first
+- Cannot restore differential without full
+
+Limitations:
+- Only one differential backup since full
+- Using older differential wastes space (duplicate changes)
+
+Syntax:
+BACKUP DATABASE [DatabaseName]
+TO DISK = N'C:\Backups\DB_Diff_20250124.bak'
+WITH DIFFERENTIAL, COMPRESSION, INIT, STATS = 10;
+
+Recovery sequence:
+RESTORE DATABASE [DB] FROM DISK = 'Full.bak' WITH NORECOVERY;
+RESTORE DATABASE [DB] FROM DISK = 'Diff.bak' WITH RECOVERY;
+-- No log restore needed if using differential to recover point
+
+3. TRANSACTION LOG BACKUP
+
+Definition: Backup of transaction log since last backup
+
+Components backed up:
+- All transaction log entries
+- Changes to all objects
+- Begins at last checkpoint/backup
+
+Time: Very quick (log is sequential)
+Size: Small (typically KB to MB)
+Frequency: Very frequent (every few minutes in production)
+
+Recovery granularity:
+- Minute-level recovery window
+- Can restore to specific LSN or time
+
+Prerequisites:
+- Database must be in FULL or BULK_LOGGED recovery
+- Not available in SIMPLE recovery
+
+Syntax:
+BACKUP LOG [DatabaseName]
+TO DISK = N'C:\Backups\DB_Log_20250124_1000.trn'
+WITH COMPRESSION, INIT, STATS = 10;
+
+Restore sequence:
+RESTORE DATABASE [DB] FROM DISK = 'Full.bak' WITH NORECOVERY;
+RESTORE DATABASE [DB] FROM DISK = 'Diff.bak' WITH NORECOVERY;
+RESTORE LOG [DB] FROM DISK = 'Log1.trn' WITH NORECOVERY;
+RESTORE LOG [DB] FROM DISK = 'Log2.trn' WITH NORECOVERY;
+RESTORE LOG [DB] FROM DISK = 'Log3.trn' WITH RECOVERY, STOPAT = '2025-01-24 10:30:00';
+
+BACKUP STRATEGY FOR PRODUCTION:
+
+Recommended approach (FULL recovery databases):
+
+Daily Schedule:
+- 11:00 PM: Full backup (after business hours)
+- 6:00 AM: Differential backup (before work)
+- Every 15 minutes: Transaction log backup (throughout day)
+
+Recovery time objectives:
+- RPO (Recovery Point Objective): 15 minutes
+- RTO (Recovery Time Objective): 1 hour
+- Data loss: Maximum 15 minutes
+- Recovery time: Maximum 1 hour
+
+Calculation:
+- Restore full backup: 20 minutes
+- Restore differential: 10 minutes
+- Restore log backups (4x): 10 minutes
+- Verify data: 10 minutes
+- Total: ~1 hour
+
+Alternatives for critical systems:
+- More frequent log backups (every 5 minutes)
+- Multiple replicas (AlwaysOn Availability Groups)
+- Continuous replication (log shipping)
+
+POINT-IN-TIME RECOVERY:
+
+Restoring to specific time in past (full recovery model).
+
+Prerequisites:
+- Uninterrupted backup chain
+- All log backups since full/differential
+
+Steps:
+1. Stop all connections to database
+2. Restore full backup WITH NORECOVERY
+3. Restore differential WITH NORECOVERY (optional)
+4. Restore log backups WITH NORECOVERY
+5. Final log restore WITH RECOVERY, STOPAT = '<time>'
+
+Key parameters:
+
+STOPAT: Specific date and time
+STOPATMARK: Specific marked transaction
+STOPBEFOREMARK: Just before marked transaction
+STOPAFTERMARK: Just after marked transaction
+
+Example:
+RESTORE LOG [DB] 
+FROM DISK = 'Log_Backup.trn'
+WITH RECOVERY, STOPAT = '2025-01-24 10:30:45.123';
+
+LSN (Log Sequence Number):
+
+LSN = Logical identifier for each log record
+Format: [VLF ID]:[LSN within VLF]:[Slot]
+
+Example: 00000014:00000163:0001
+
+Used for:
+- Precise recovery point
+- Replication tracking
+- Synchronization
+
+Query LSN:
+SELECT 
+    backup_start_date,
+    first_lsn,
+    last_lsn,
+    checkpoint_lsn
+FROM msdb.dbo.backupset
+WHERE database_name = 'DB'
+ORDER BY backup_start_date;
+
+BACKUP VALIDATION:
+
+Always test restores:
+
+VERIFY command:
+RESTORE VERIFYONLY FROM DISK = 'Backup.bak';
+
+Full restore test:
+-- Restore to test database
+RESTORE DATABASE [DB_Test]
+FROM DISK = 'Backup.bak'
+WITH REPLACE;
+
+-- Verify data integrity
+DBCC CHECKDB ([DB_Test]);
+
+-- Compare with production
+SELECT COUNT(*) FROM [DB_Test].dbo.Table1;
+
+Risk of not testing:
+- Backup file corrupted
+- Restore fails when needed
+- Data lost permanently
+
+Best practice:
+- Test full restore weekly
+- Test log restore weekly
+- Document restore time
+- Update runbooks with actual times
+
+================================================================================
+9. PERFORMANCE TUNING FOUNDATIONS
+================================================================================
+
+PERFORMANCE TUNING METHODOLOGY:
+
+Step 1: ESTABLISH BASELINE
+- Measure current performance
+- Document metrics
+- Set targets
+
+Step 2: IDENTIFY BOTTLENECK
+- CPU, Memory, I/O, or Blocking?
+- Which queries affected?
+- Impact on users?
+
+Step 3: ANALYZE ROOT CAUSE
+- Execution plan analysis
+- Index usage review
+- Wait statistics analysis
+
+Step 4: IMPLEMENT FIX
+- Small, isolated changes
+- Test in staging first
+- Have rollback plan
+
+Step 5: MEASURE IMPROVEMENT
+- Compare to baseline
+- Verify no regressions
+- Document results
+
+Step 6: MONITOR ONGOING
+- Alerting for regressions
+- Capacity planning
+- Proactive optimization
+
+PERFORMANCE COUNTERS:
+
+CPU Performance:
+- Processor % Processor Time: CPU utilization
+- SQL Server: Batch Requests/sec: Workload intensity
+- Ideal: < 80% sustained
+
+Memory Performance:
+- Memory: Pages/sec: Paging to disk (bad)
+- SQL Server: Total Server Memory: Current usage
+- Ideal: Pages/sec < 10 (memory pressure)
+
+Disk I/O Performance:
+- PhysicalDisk: Disk Queue Length: I/O wait queue
+- PhysicalDisk: % Disk Time: Disk utilization
+- SQL Server: Physical Reads/sec: I/O rate
+- Ideal: Queue length < disk spindle count
+
+Wait Statistics:
+
+Wait Type Analysis:
+- PAGELATCH: Buffer pool contention
+- LOCK: Blocking or deadlock
+- CXPACKET: Parallelism waits
+- IO_COMPLETION: Disk I/O waiting
+- PREEMPTIVE: CLR or OS calls
+
+Healthy wait pattern:
+- CXPACKET: 20-30% (parallelism)
+- IO_COMPLETION: 10-20% (normal disk)
+- Sleeping: 20-30% (idle threads)
+- Others: Various
+
+DMV ANALYSIS:
+
+Dynamic Management Views provide real-time server state.
+
+Key DMVs for performance:
+
+sys.dm_exec_query_stats:
+- Execution count
+- Total elapsed time
+- Total CPU time
+- Total I/O
+
+sys.dm_exec_sessions:
+- Active sessions
+- Connection info
+- CPU/memory usage
+
+sys.dm_exec_requests:
+- Running queries
+- CPU time elapsed
+- I/O counts
+- Blocking info
+
+sys.dm_os_performance_counters:
+- Real-time counter values
+- Memory, CPU, disk metrics
+
+sys.dm_os_waiting_tasks:
+- Sessions waiting for resources
+- Wait type
+- Wait duration
+
+sys.dm_db_missing_index_details:
+- Missing index suggestions
+- Improvement estimates
+
+Example query for top resource queries:
+SELECT TOP 10
+    execution_count,
+    total_elapsed_time / execution_count / 1000000 AS [Avg Duration (sec)],
+    total_worker_time / execution_count / 1000000 AS [Avg CPU (sec)],
+    SUBSTRING(text, 1, 80) AS [Query]
+FROM sys.dm_exec_query_stats
+CROSS APPLY sys.dm_exec_sql_text(sql_handle)
+WHERE total_elapsed_time > 1000000  -- > 1 second
+ORDER BY total_elapsed_time DESC;
+
+EXECUTION PLAN ANALYSIS:
+
+Execution plans show:
+- Operations (Table Scan, Index Seek, etc.)
+- Row counts (estimated vs actual)
+- Cost percentages
+- Parallelism info
+
+Red flags in plans:
+- Table Scan (full table read): Should be Index Seek
+- Hash Aggregate instead of Stream Aggregate: More memory
+- Sort: Expensive operation
+- Nested Loop with many rows: Use Hash Join instead
+
+Cost percentages:
+- Highest cost operations: Focus optimization here
+- Parallel operations: Watch for scaling
+- Missing indexes: Note operator costs
+
+Query Store:
+
+SQL Server 2025 feature for plan tracking.
+
+Tracks:
+- Multiple plans per query
+- Execution metrics over time
+- Plan changes (regressions)
+- Resource consumption
+
+Benefits:
+- Identify plan regressions
+- Force specific plan
+- A/B test plans
+- Regression tracking
+
+Enable:
+ALTER DATABASE [DB] SET QUERY_STORE = ON;
+
+Force plan:
+EXEC sp_query_store_force_plan @query_id = 1, @plan_id = 1;
+
+Find regressions:
+SELECT 
+    q.query_id,
+    p1.plan_id AS [Better Plan],
+    p2.plan_id AS [Worse Plan],
+    p1.avg_total_user_wait_time_ms,
+    p2.avg_total_user_wait_time_ms
+FROM sys.query_store_query q
+JOIN sys.query_store_plan p1 ON q.query_id = p1.query_id
+JOIN sys.query_store_plan p2 ON q.query_id = p2.query_id
+WHERE p2.avg_total_user_wait_time_ms > p1.avg_total_user_wait_time_ms * 1.1;
+
+================================================================================
+END OF DAY 1 DEEP DIVE
+================================================================================
+
+KEY TAKEAWAYS:
+
+1. SQL Server architecture separates concerns through layers
+2. Memory is the most critical resource
+3. Query optimization uses sophisticated cardinality estimation
+4. Proper configuration prevents most performance issues
+5. Authentication should follow least privilege principle
+6. Backups must be tested regularly
+7. Recovery time depends on backup strategy
+8. Performance tuning follows systematic methodology
+
+NEXT STEPS FOR DAY 2:
+
+- Monitoring with DMVs and Extended Events
+- Troubleshooting methodology
+- Wait statistics analysis
+- Blocking and deadlock resolution
+- Capacity planning
+
+FURTHER LEARNING:
+
+- SQL Server 2025 Books Online
+- Query Store for plan history
+- Extended Events for detailed tracing
+- Performance Monitor for system metrics
+- Dynamic Management Views for real-time data
+
+================================================================================

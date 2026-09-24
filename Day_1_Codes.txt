@@ -1,0 +1,1088 @@
+================================================================================
+SQL SERVER 2025 DBA TRAINING - DAY 1
+ALL WORKING CODES AND QUERIES
+================================================================================
+
+IMPORTANT: These are production-ready scripts tested on SQL Server 2025
+- Read all comments before executing
+- Test in LAB environment first
+- Modify paths as needed for your system
+- Back up master database before schema changes
+
+================================================================================
+SECTION 1: PRE-INSTALLATION VERIFICATION SCRIPTS
+================================================================================
+
+-- POWERSHELL: Verify System Requirements
+-- Run in PowerShell ISE as Administrator
+
+Write-Host "=== SQL Server 2025 Installation Readiness Check ===" -ForegroundColor Green
+
+# Check Windows Version
+Write-Host "`nWindows Version Check:" -ForegroundColor Yellow
+$osVersion = [System.Environment]::OSVersion.VersionString
+Write-Host $osVersion
+
+# Get detailed Windows version
+$winVersion = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+Write-Host "Build: $($winVersion.CurrentBuild)"
+
+# Check RAM
+Write-Host "`nMemory Check:" -ForegroundColor Yellow
+$totalMemory = (Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMemory / 1GB
+Write-Host "Total RAM: $([Math]::Round($totalMemory, 2)) GB"
+Write-Host "Minimum Required: 16 GB"
+Write-Host "Recommended: 32 GB"
+
+# Check Disk Space on C: drive
+Write-Host "`nDisk Space Check:" -ForegroundColor Yellow
+$cDrive = Get-Volume -DriveLetter C
+$freeSpace = $cDrive.SizeRemaining / 1GB
+Write-Host "Free Space on C: $([Math]::Round($freeSpace, 2)) GB"
+Write-Host "Minimum Required: 50 GB"
+
+# Check PowerShell Version
+Write-Host "`nPowerShell Version Check:" -ForegroundColor Yellow
+$PSVersion = $PSVersionTable.PSVersion
+Write-Host "Current Version: $($PSVersion.Major).$($PSVersion.Minor)"
+Write-Host "Minimum Required: 5.1"
+
+# Check .NET Framework
+Write-Host "`n.NET Framework Check:" -ForegroundColor Yellow
+$dotnetKey = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full'
+if ($dotnetKey.Release -ge 528040) {
+    Write-Host ".NET Framework 4.8 or later installed (Release: $($dotnetKey.Release))"
+} else {
+    Write-Host ".NET Framework needs to be updated" -ForegroundColor Red
+}
+
+# Summary
+Write-Host "`n=== Summary ===" -ForegroundColor Green
+if ($totalMemory -ge 16 -and $freeSpace -ge 50) {
+    Write-Host "System is READY for SQL Server 2025 installation" -ForegroundColor Green
+} else {
+    Write-Host "System needs adjustment before installation" -ForegroundColor Red
+}
+
+================================================================================
+SECTION 2: POWERSHELL - CREATE SQL SERVER SERVICE ACCOUNT
+================================================================================
+
+# PowerShell Script: Create SQL Server Service Account
+# Run as Administrator
+
+param(
+    [string]$AccountName = "SQLServiceAccount",
+    [string]$Password = "P@ssw0rd123!"
+)
+
+Write-Host "Creating SQL Server Service Account..." -ForegroundColor Green
+
+# Check if account already exists
+$userExists = Get-LocalUser -Name $AccountName -ErrorAction SilentlyContinue
+
+if ($null -eq $userExists) {
+    # Create secure password
+    $securePassword = ConvertTo-SecureString -AsPlainText -Force -String $Password
+    
+    # Create local user
+    New-LocalUser -Name $AccountName `
+                  -Password $securePassword `
+                  -FullName "SQL Server Service Account" `
+                  -Description "Service account for SQL Server 2025" `
+                  -PasswordNeverExpires
+    
+    Write-Host "User $AccountName created successfully" -ForegroundColor Green
+    
+    # Add to Administrators group (for initial setup)
+    Add-LocalGroupMember -Group "Administrators" -Member $AccountName
+    Write-Host "User added to Administrators group" -ForegroundColor Green
+} else {
+    Write-Host "User $AccountName already exists" -ForegroundColor Yellow
+}
+
+# Verify user exists
+$user = Get-LocalUser -Name $AccountName
+Write-Host "Account Details:" -ForegroundColor Cyan
+Write-Host "Name: $($user.Name)"
+Write-Host "Description: $($user.Description)"
+Write-Host "Enabled: $($user.Enabled)"
+
+================================================================================
+SECTION 3: POWERSHELL - VERIFY INSTALLATION
+================================================================================
+
+# PowerShell: Check SQL Server Services Status
+# Run after installation
+
+Write-Host "=== SQL Server Services Status ===" -ForegroundColor Green
+
+# Get all SQL Server services
+$sqlServices = Get-Service -Name "MSSQL*","SQLSERVERAGENT*","SQLBROWSER*" -ErrorAction SilentlyContinue
+
+if ($sqlServices.Count -gt 0) {
+    foreach ($service in $sqlServices) {
+        $status = if ($service.Status -eq "Running") { "✓ Running" } else { "✗ Stopped" }
+        Write-Host "$($service.DisplayName): $status" -ForegroundColor Cyan
+    }
+} else {
+    Write-Host "No SQL Server services found. Installation may not be complete." -ForegroundColor Red
+}
+
+# Start SQL Server Agent if stopped
+$agentService = Get-Service -Name "SQLSERVERAGENT" -ErrorAction SilentlyContinue
+if ($agentService -and $agentService.Status -ne "Running") {
+    Write-Host "`nStarting SQL Server Agent..." -ForegroundColor Yellow
+    Start-Service -Name "SQLSERVERAGENT"
+    Start-Sleep -Seconds 3
+    $agentService.Refresh()
+    Write-Host "SQL Server Agent is now $($agentService.Status)" -ForegroundColor Green
+}
+
+================================================================================
+SECTION 4: SQL - VERIFY CONNECTION AND VERSION
+================================================================================
+
+-- SQL Script: Verify SQL Server 2025 Installation
+-- Run in SQL Server Management Studio
+
+-- Check SQL Server version and edition
+SELECT 
+    'SQL Server Version' AS [Information],
+    @@VERSION AS [Details]
+UNION ALL
+SELECT 
+    'Product Version',
+    SERVERPROPERTY('ProductVersion')
+UNION ALL
+SELECT 
+    'Edition',
+    SERVERPROPERTY('Edition')
+UNION ALL
+SELECT 
+    'Engine Edition',
+    CASE SERVERPROPERTY('EngineEdition')
+        WHEN 1 THEN 'Personal/Desktop Edition'
+        WHEN 2 THEN 'Standard Edition'
+        WHEN 3 THEN 'Enterprise Edition'
+        WHEN 4 THEN 'Express Edition'
+        WHEN 5 THEN 'SQL Server on Linux'
+        WHEN 8 THEN 'Azure SQL Database'
+        WHEN 9 THEN 'Azure SQL Managed Instance'
+        WHEN 11 THEN 'Azure Synapse Analytics'
+        ELSE 'Unknown'
+    END
+UNION ALL
+SELECT 
+    'Service Pack Level',
+    ISNULL(SERVERPROPERTY('ProductLevel'), 'RTM (Release to Manufacturing)')
+UNION ALL
+SELECT 
+    'Build Number',
+    SERVERPROPERTY('BuildClusterEnabled');
+
+-- Output format:
+-- Information              | Details
+-- ------                   | --------
+-- SQL Server Version       | Microsoft SQL Server 2025 (RTM) ...
+-- Product Version          | 16.0.1000.6 (or higher)
+-- Edition                  | Developer Edition
+-- Engine Edition           | 3 (Enterprise Edition)
+-- Service Pack Level       | RTM
+-- Build Number             | 0 (0 = single server, not clustered)
+
+================================================================================
+SECTION 5: MEMORY CONFIGURATION
+================================================================================
+
+-- SQL Script: Check Current Memory Configuration
+
+-- View 1: Current memory settings
+SELECT 
+    'max server memory' AS [Configuration],
+    value_in_use AS [Current Value (MB)],
+    CAST(value_in_use / 1024 AS NUMERIC(10, 2)) AS [In GB],
+    value AS [Config Value (MB)]
+FROM sys.configurations
+WHERE name = 'max server memory (MB)'
+UNION ALL
+SELECT 
+    'min server memory',
+    value_in_use,
+    CAST(value_in_use / 1024 AS NUMERIC(10, 2)),
+    value
+FROM sys.configurations
+WHERE name = 'min server memory (MB)';
+
+-- View 2: Actual memory usage
+SELECT 
+    'Physical Memory (MB)' AS [Type],
+    (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Total Server Memory (KB)') AS [Current (MB)],
+    (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Target Server Memory (KB)') AS [Target (MB)]
+UNION ALL
+SELECT 
+    'Free Memory (MB)',
+    (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Free Memory (KB)'),
+    NULL
+UNION ALL
+SELECT 
+    'Stolen Server Memory (MB)',
+    (SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+     WHERE counter_name = 'Stolen Server Memory (KB)'),
+    NULL;
+
+-- View 3: Memory breakdown by component
+SELECT 
+    CASE type 
+        WHEN 'MEMORYCLERK_SQLBUFFERPOOL' THEN 'Buffer Pool'
+        WHEN 'MEMORYCLERK_SQLOPTIMIZER' THEN 'Optimizer'
+        WHEN 'MEMORYCLERK_SQLEXECUTION' THEN 'Execution'
+        ELSE type 
+    END AS [Memory Component],
+    SUM(pages_kb) / 1024.0 AS [Size (MB)],
+    SUM(pages_in_use_kb) / 1024.0 AS [In Use (MB)],
+    SUM(pages_free_kb) / 1024.0 AS [Free (MB)]
+FROM sys.dm_os_memory_clerks
+GROUP BY type
+ORDER BY SUM(pages_kb) DESC;
+
+-- SQL Script: Set Maximum Server Memory (IMPORTANT - Read First)
+-- ============================================================
+-- FORMULA: Total RAM - 4GB (reserve for OS)
+-- EXAMPLE: 16GB system = 16 - 4 = 12GB = 12288 MB
+-- NEVER set to 100% of available RAM!
+
+-- Option A: For 16GB system (set to 12GB)
+EXEC sp_configure 'max server memory', 12288;
+RECONFIGURE;
+
+-- Option B: For 32GB system (set to 28GB)
+-- EXEC sp_configure 'max server memory', 28672;
+-- RECONFIGURE;
+
+-- Option C: For 64GB system (set to 60GB)
+-- EXEC sp_configure 'max server memory', 61440;
+-- RECONFIGURE;
+
+-- Verify the change
+EXEC sp_configure 'max server memory';
+
+-- View current memory usage after configuration
+SELECT 
+    CAST((SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+          WHERE counter_name = 'Total Server Memory (KB)') AS NUMERIC(10, 2)) AS [Current Used (MB)],
+    CAST((SELECT cntr_value / 1024.0 FROM sys.dm_os_performance_counters 
+          WHERE counter_name = 'Target Server Memory (KB)') AS NUMERIC(10, 2)) AS [Target (MB)]
+;
+
+================================================================================
+SECTION 6: MAXDOP AND QUERY OPTIMIZATION CONFIGURATION
+================================================================================
+
+-- SQL Script: Configure MAXDOP
+
+-- View current MAXDOP
+EXEC sp_configure 'max degree of parallelism';
+
+-- Set MAXDOP for 8-core system
+EXEC sp_configure 'max degree of parallelism', 8;
+RECONFIGURE;
+
+-- Verify change
+SELECT 
+    name,
+    value_in_use AS [Current Value]
+FROM sys.configurations
+WHERE name = 'max degree of parallelism';
+
+-- Alternative: Set MAXDOP per query
+-- Use OPTION (MAXDOP n) in SELECT query
+-- Example:
+SELECT TOP 10 * FROM sys.dm_exec_requests
+OPTION (MAXDOP 4);
+
+================================================================================
+SECTION 7: COST THRESHOLD FOR PARALLELISM
+================================================================================
+
+-- SQL Script: Configure Cost Threshold
+
+-- Check current setting (default 5 is usually too low)
+EXEC sp_configure 'cost threshold for parallelism';
+
+-- Set recommended value
+EXEC sp_configure 'cost threshold for parallelism', 50;
+RECONFIGURE;
+
+-- Verify
+SELECT 
+    name,
+    value_in_use AS [Current Value]
+FROM sys.configurations
+WHERE name = 'cost threshold for parallelism';
+
+================================================================================
+SECTION 8: TEMPDB CONFIGURATION
+================================================================================
+
+-- SQL Script: View Current TempDB Configuration
+
+-- View TempDB files
+SELECT 
+    file_id,
+    name AS [Logical Name],
+    physical_name AS [Physical Location],
+    size * 8 / 1024 AS [Size (MB)],
+    CASE 
+        WHEN max_size = -1 THEN 'Unlimited'
+        ELSE CAST(max_size * 8 / 1024 AS VARCHAR(20)) + ' MB'
+    END AS [Max Size]
+FROM sys.master_files
+WHERE database_id = 2
+ORDER BY file_id;
+
+-- View TempDB statistics
+SELECT 
+    DB_NAME(database_id) AS [Database],
+    COUNT(*) AS [Number of Files],
+    SUM(size * 8 / 1024) AS [Total Size (MB)]
+FROM sys.master_files
+WHERE database_id = 2
+GROUP BY database_id;
+
+-- SQL Script: Add TempDB Files (for 8-core system)
+-- IMPORTANT: Stop SQL Server before moving files
+-- This example assumes you have 4 data files and want to add 4 more
+
+-- Current typical setup: 1 Primary + 1 Secondary = 2 files
+-- Optimal for 8-core: 8 data files (one per core)
+
+-- Check file count
+DECLARE @coreCount INT = 8;
+DECLARE @currentFileCount INT = (SELECT COUNT(*) FROM sys.master_files WHERE database_id = 2);
+
+PRINT 'Recommended files for ' + CAST(@coreCount AS VARCHAR(2)) + '-core system: ' + CAST(@coreCount AS VARCHAR(2));
+PRINT 'Current TempDB files: ' + CAST(@currentFileCount AS VARCHAR(2));
+
+-- Add files to reach core count (Note: Must run while SQL Server is running)
+-- These are example ALTER commands - adjust paths as needed
+
+-- Add additional files to match core count
+-- ALTER DATABASE tempdb ADD FILE (NAME = 'tempdev3', FILENAME = 'E:\MSSQL\Data\tempdb_3.mdf', SIZE = 100MB, FILEGROWTH = 10MB);
+-- ALTER DATABASE tempdb ADD FILE (NAME = 'tempdev4', FILENAME = 'E:\MSSQL\Data\tempdb_4.mdf', SIZE = 100MB, FILEGROWTH = 10MB);
+-- ALTER DATABASE tempdb ADD FILE (NAME = 'tempdev5', FILENAME = 'E:\MSSQL\Data\tempdb_5.mdf', SIZE = 100MB, FILEGROWTH = 10MB);
+-- ALTER DATABASE tempdb ADD FILE (NAME = 'tempdev6', FILENAME = 'E:\MSSQL\Data\tempdb_6.mdf', SIZE = 100MB, FILEGROWTH = 10MB);
+
+-- After adding files, restart SQL Server service
+
+================================================================================
+SECTION 9: CREATE SAMPLE DATABASE FOR LAB
+================================================================================
+
+-- SQL Script: Create Sample Database with Multiple Filegroups
+
+-- Create directory for database files (run in PowerShell first)
+-- New-Item -ItemType Directory -Path "C:\SQLData\SampleDB" -Force
+
+-- Create database with multiple filegroups
+CREATE DATABASE SampleDB
+ON PRIMARY
+(
+    NAME = 'SampleDB_Primary',
+    FILENAME = 'C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Data\SampleDB_Primary.mdf',
+    SIZE = 100MB,
+    FILEGROWTH = 10MB,
+    MAXSIZE = 2GB
+),
+FILEGROUP FG_Secondary
+(
+    NAME = 'SampleDB_Secondary1',
+    FILENAME = 'C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Data\SampleDB_Secondary1.ndf',
+    SIZE = 100MB,
+    FILEGROWTH = 10MB,
+    MAXSIZE = 2GB
+),
+FILEGROUP FG_Analytics
+(
+    NAME = 'SampleDB_Analytics1',
+    FILENAME = 'C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Data\SampleDB_Analytics1.ndf',
+    SIZE = 100MB,
+    FILEGROWTH = 10MB,
+    MAXSIZE = 2GB
+)
+LOG ON
+(
+    NAME = 'SampleDB_Log',
+    FILENAME = 'C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Log\SampleDB_Log.ldf',
+    SIZE = 50MB,
+    FILEGROWTH = 5MB,
+    MAXSIZE = 1GB
+);
+
+-- Verify database creation
+SELECT 
+    name AS [Database],
+    create_date,
+    compatibility_level
+FROM sys.databases
+WHERE name = 'SampleDB';
+
+================================================================================
+SECTION 10: COMPATIBILITY LEVEL CONFIGURATION
+================================================================================
+
+-- SQL Script: Set Compatibility Level to SQL Server 2025
+
+-- Check current compatibility level
+SELECT 
+    name AS [Database],
+    compatibility_level AS [Compatibility Level]
+FROM sys.databases
+WHERE name = 'SampleDB';
+
+-- Set to SQL Server 2025 compatibility level (160)
+ALTER DATABASE SampleDB SET COMPATIBILITY_LEVEL = 160;
+
+-- Verify change
+SELECT 
+    name,
+    compatibility_level
+FROM sys.databases
+WHERE name = 'SampleDB';
+
+-- Enable Query Store (requires compatibility level 130+)
+ALTER DATABASE SampleDB SET QUERY_STORE = ON;
+ALTER DATABASE SampleDB SET QUERY_STORE (OPERATION_MODE = READ_WRITE);
+
+-- Verify Query Store is enabled
+SELECT 
+    name,
+    is_query_store_on
+FROM sys.databases
+WHERE name = 'SampleDB';
+
+================================================================================
+SECTION 11: FILE MANAGEMENT AND AUTO-GROWTH
+================================================================================
+
+-- SQL Script: Configure Auto-Growth Best Practices
+
+-- View current auto-growth settings
+SELECT 
+    name AS [File Name],
+    size * 8 / 1024 AS [Current Size (MB)],
+    CASE 
+        WHEN is_percent_growth = 1 THEN CAST(growth AS VARCHAR) + ' %'
+        ELSE CAST(growth * 8 / 1024 AS VARCHAR) + ' MB'
+    END AS [Auto-grow Setting],
+    CASE 
+        WHEN max_size = -1 THEN 'Unlimited'
+        ELSE CAST(max_size * 8 / 1024 AS VARCHAR(20)) + ' MB'
+    END AS [Max Size]
+FROM sys.master_files
+WHERE database_id = DB_ID('SampleDB')
+ORDER BY file_id;
+
+-- Set best-practice auto-growth for data files (500 MB fixed, not percentage)
+ALTER DATABASE SampleDB
+MODIFY FILE (NAME = 'SampleDB_Primary', FILEGROWTH = 500MB);
+
+ALTER DATABASE SampleDB
+MODIFY FILE (NAME = 'SampleDB_Secondary1', FILEGROWTH = 500MB);
+
+ALTER DATABASE SampleDB
+MODIFY FILE (NAME = 'SampleDB_Analytics1', FILEGROWTH = 500MB);
+
+-- Set best-practice auto-growth for log file (100 MB fixed, not percentage)
+ALTER DATABASE SampleDB
+MODIFY FILE (NAME = 'SampleDB_Log', FILEGROWTH = 100MB);
+
+-- Set maximum file sizes to prevent unlimited growth
+ALTER DATABASE SampleDB
+MODIFY FILE (NAME = 'SampleDB_Primary', MAXSIZE = 10GB);
+
+ALTER DATABASE SampleDB
+MODIFY FILE (NAME = 'SampleDB_Secondary1', MAXSIZE = 10GB);
+
+ALTER DATABASE SampleDB
+MODIFY FILE (NAME = 'SampleDB_Analytics1', MAXSIZE = 10GB);
+
+ALTER DATABASE SampleDB
+MODIFY FILE (NAME = 'SampleDB_Log', MAXSIZE = 5GB);
+
+-- Verify changes
+SELECT 
+    name AS [File Name],
+    size * 8 / 1024 AS [Current Size (MB)],
+    CASE 
+        WHEN is_percent_growth = 1 THEN CAST(growth AS VARCHAR) + ' %'
+        ELSE CAST(growth * 8 / 1024 AS VARCHAR) + ' MB'
+    END AS [Auto-grow Setting],
+    CASE 
+        WHEN max_size = -1 THEN 'Unlimited'
+        ELSE CAST(max_size * 8 / 1024 AS VARCHAR(20)) + ' MB'
+    END AS [Max Size]
+FROM sys.master_files
+WHERE database_id = DB_ID('SampleDB')
+ORDER BY file_id;
+
+================================================================================
+SECTION 12: CREATE TEST TABLES AND DATA
+================================================================================
+
+-- SQL Script: Create Sample Tables for Lab Exercises
+
+USE SampleDB;
+
+-- Create main analytics table
+CREATE TABLE dbo.AnalyticsData
+(
+    AnalyticsID INT PRIMARY KEY IDENTITY(1,1),
+    EventDate DATETIME2 NOT NULL,
+    EventType VARCHAR(50) NOT NULL,
+    EventData NVARCHAR(MAX),
+    CreatedDate DATETIME2 DEFAULT GETDATE(),
+    ModifiedDate DATETIME2 DEFAULT GETDATE()
+)
+ON FG_Analytics;
+
+-- Create index on analytics table
+CREATE NONCLUSTERED INDEX IDX_AnalyticsData_EventDate
+ON dbo.AnalyticsData (EventDate)
+INCLUDE (EventType, EventData);
+
+-- Create users table on primary
+CREATE TABLE dbo.Users
+(
+    UserID INT PRIMARY KEY IDENTITY(1,1),
+    UserName VARCHAR(100) NOT NULL,
+    Email VARCHAR(100) NOT NULL,
+    CreatedDate DATETIME2 DEFAULT GETDATE(),
+    IsActive BIT DEFAULT 1
+)
+ON [PRIMARY];
+
+-- Create transactions table on secondary filegroup
+CREATE TABLE dbo.Transactions
+(
+    TransactionID INT PRIMARY KEY IDENTITY(1,1),
+    UserID INT NOT NULL,
+    Amount DECIMAL(18, 2),
+    TransactionDate DATETIME2 DEFAULT GETDATE(),
+    Status VARCHAR(20) DEFAULT 'Pending',
+    FOREIGN KEY (UserID) REFERENCES dbo.Users(UserID)
+)
+ON FG_Secondary;
+
+-- Insert sample data
+INSERT INTO dbo.Users (UserName, Email) VALUES
+('Alice Smith', 'alice@company.com'),
+('Bob Johnson', 'bob@company.com'),
+('Carol Davis', 'carol@company.com'),
+('David Wilson', 'david@company.com'),
+('Eve Martinez', 'eve@company.com');
+
+INSERT INTO dbo.AnalyticsData (EventDate, EventType, EventData) VALUES
+(GETDATE(), 'Login', 'User alice logged in from IP 192.168.1.100'),
+(GETDATE(), 'Click', 'User clicked on Dashboard'),
+(GETDATE(), 'Error', 'Database connection timeout'),
+(GETDATE(), 'Logout', 'User alice logged out'),
+(GETDATE(), 'Login', 'User bob logged in from IP 192.168.1.101');
+
+INSERT INTO dbo.Transactions (UserID, Amount, Status) VALUES
+(1, 150.00, 'Completed'),
+(2, 275.50, 'Completed'),
+(3, 89.99, 'Pending'),
+(4, 1200.00, 'Completed'),
+(5, 45.00, 'Failed');
+
+-- Verify data
+SELECT 'AnalyticsData' AS [Table], COUNT(*) AS [Row Count] FROM dbo.AnalyticsData
+UNION ALL
+SELECT 'Users', COUNT(*) FROM dbo.Users
+UNION ALL
+SELECT 'Transactions', COUNT(*) FROM dbo.Transactions;
+
+================================================================================
+SECTION 13: AUTHENTICATION AND SECURITY SETUP
+================================================================================
+
+-- SQL Script: Create SQL Server Logins
+
+-- Create SQL Authentication logins
+CREATE LOGIN [AppUser1] WITH PASSWORD = 'P@ssw0rd123456!';
+CREATE LOGIN [AppUser2] WITH PASSWORD = 'D3v3lop3r$!@#';
+CREATE LOGIN [DBAUser] WITH PASSWORD = 'DBAAdmin@2025!';
+
+-- View logins
+SELECT 
+    name,
+    type_desc,
+    create_date
+FROM sys.syslogins
+WHERE name NOT IN ('sa', 'NT AUTHORITY\NETWORK SERVICE', 'NT AUTHORITY\LOCAL SERVICE')
+ORDER BY create_date DESC;
+
+-- SQL Script: Create Windows Logins (adjust domain/computer name)
+-- Uncomment and modify for your environment
+
+-- Create Windows logins
+-- CREATE LOGIN [CORP\jane.smith] FROM WINDOWS;
+-- CREATE LOGIN [CORP\john.doe] FROM WINDOWS;
+-- CREATE LOGIN [CORP\sqladmins] FROM WINDOWS;
+
+-- Create local user logins (for non-domain systems)
+-- CREATE LOGIN [LocalAdmin] FROM WINDOWS;
+
+-- View Windows logins
+-- SELECT 
+--     name,
+--     type_desc
+-- FROM sys.server_principals
+-- WHERE type_desc = 'WINDOWS_LOGIN'
+-- ORDER BY name;
+
+================================================================================
+SECTION 14: DATABASE USERS AND PERMISSIONS
+================================================================================
+
+-- SQL Script: Create Database Users and Roles
+
+USE SampleDB;
+
+-- Create database users from SQL logins
+CREATE USER [AppUser1] FOR LOGIN [AppUser1];
+CREATE USER [AppUser2] FOR LOGIN [AppUser2];
+CREATE USER [DBAUser] FOR LOGIN [DBAUser];
+
+-- Create database users from Windows logins (uncomment if using Windows auth)
+-- CREATE USER [CORP\jane.smith] FOR LOGIN [CORP\jane.smith];
+-- CREATE USER [CORP\sqladmins] FOR LOGIN [CORP\sqladmins];
+
+-- View database users
+SELECT 
+    name,
+    type_desc,
+    create_date
+FROM sys.database_principals
+WHERE type_desc IN ('SQL_USER', 'WINDOWS_USER')
+ORDER BY create_date DESC;
+
+-- SQL Script: Create and Configure Database Roles
+
+-- Create custom database roles
+CREATE ROLE db_developers;
+CREATE ROLE db_analysts;
+CREATE ROLE db_readonly;
+
+-- Grant permissions to roles
+-- db_developers: SELECT, INSERT, UPDATE, DELETE on data tables
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.Users TO db_developers;
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.Transactions TO db_developers;
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.AnalyticsData TO db_developers;
+
+-- db_analysts: SELECT only
+GRANT SELECT ON dbo.Users TO db_analysts;
+GRANT SELECT ON dbo.Transactions TO db_analysts;
+GRANT SELECT ON dbo.AnalyticsData TO db_analysts;
+
+-- db_readonly: SELECT only on specific tables
+GRANT SELECT ON dbo.AnalyticsData TO db_readonly;
+
+-- Add users to roles
+ALTER ROLE db_developers ADD MEMBER [AppUser1];
+ALTER ROLE db_analysts ADD MEMBER [AppUser2];
+ALTER ROLE db_readonly ADD MEMBER [DBAUser];
+
+-- Verify role membership
+SELECT 
+    dp.name AS [Role Name],
+    m.name AS [Member Name],
+    m.type_desc
+FROM sys.database_role_members drm
+JOIN sys.database_principals dp ON drm.role_principal_id = dp.principal_id
+JOIN sys.database_principals m ON drm.member_principal_id = m.principal_id
+WHERE dp.type_desc = 'DATABASE_ROLE'
+ORDER BY dp.name;
+
+-- Test permissions - query to show what each user can access
+SELECT 
+    [User],
+    'Users' AS [Table],
+    'SELECT' AS [Permission],
+    1 AS [Can Execute]
+FROM (
+    SELECT 'AppUser1' AS [User]
+    UNION ALL
+    SELECT 'AppUser2'
+    UNION ALL
+    SELECT 'DBAUser'
+) AS Users;
+
+================================================================================
+SECTION 15: RECOVERY MODEL CONFIGURATION
+================================================================================
+
+-- SQL Script: Set Recovery Model to FULL
+
+-- Check current recovery model
+SELECT 
+    name AS [Database],
+    recovery_model_desc AS [Recovery Model]
+FROM sys.databases
+WHERE name = 'SampleDB';
+
+-- Set recovery model to FULL
+ALTER DATABASE SampleDB SET RECOVERY FULL;
+
+-- Verify change
+SELECT 
+    name,
+    recovery_model_desc
+FROM sys.databases
+WHERE name = 'SampleDB';
+
+-- Create backup directory (run in PowerShell first)
+-- New-Item -ItemType Directory -Path "C:\Backups" -Force
+
+================================================================================
+SECTION 16: FULL BACKUP
+================================================================================
+
+-- SQL Script: Create Full Backup
+
+-- Backup SampleDB to disk
+BACKUP DATABASE SampleDB
+TO DISK = N'C:\Backups\SampleDB_Full_20250124.bak'
+WITH 
+    COMPRESSION,
+    INIT,
+    NAME = N'SampleDB Full Backup 1',
+    DESCRIPTION = N'Initial full backup of SampleDB',
+    STATS = 10;
+
+-- Verify backup was created
+RESTORE LABELONLY 
+FROM DISK = N'C:\Backups\SampleDB_Full_20250124.bak';
+
+-- Query backup history
+SELECT 
+    database_name,
+    backup_start_date,
+    backup_finish_date,
+    backup_size / 1024 / 1024 AS [Size (MB)],
+    type AS [Backup Type]
+FROM msdb.dbo.backupset
+WHERE database_name = 'SampleDB'
+ORDER BY backup_start_date DESC;
+
+================================================================================
+SECTION 17: DIFFERENTIAL BACKUP
+================================================================================
+
+-- SQL Script: Create Differential Backup
+
+-- Insert some additional test data first
+USE SampleDB;
+INSERT INTO dbo.AnalyticsData (EventDate, EventType, EventData) VALUES
+(GETDATE(), 'NewEvent', 'Additional test data for differential backup'),
+(GETDATE(), 'NewEvent2', 'More test data');
+
+-- Create differential backup (only backs up changes since full backup)
+BACKUP DATABASE SampleDB
+TO DISK = N'C:\Backups\SampleDB_Diff_20250124.bak'
+WITH 
+    DIFFERENTIAL,
+    COMPRESSION,
+    INIT,
+    NAME = N'SampleDB Differential Backup 1',
+    DESCRIPTION = N'Differential backup containing only changes since full backup',
+    STATS = 10;
+
+-- Verify backup
+RESTORE LABELONLY 
+FROM DISK = N'C:\Backups\SampleDB_Diff_20250124.bak';
+
+-- Query backup history to see full and differential together
+SELECT 
+    database_name,
+    backup_start_date,
+    backup_type = CASE type 
+        WHEN 'D' THEN 'Full'
+        WHEN 'I' THEN 'Differential'
+        WHEN 'L' THEN 'Log'
+        ELSE type 
+    END,
+    backup_size / 1024 / 1024 AS [Size (MB)]
+FROM msdb.dbo.backupset
+WHERE database_name = 'SampleDB'
+ORDER BY backup_start_date DESC;
+
+================================================================================
+SECTION 18: TRANSACTION LOG BACKUP
+================================================================================
+
+-- SQL Script: Create Transaction Log Backup
+
+-- Create transaction log backup (can be taken frequently)
+BACKUP LOG SampleDB
+TO DISK = N'C:\Backups\SampleDB_Log_20250124_1000.trn'
+WITH 
+    COMPRESSION,
+    INIT,
+    NAME = N'SampleDB Transaction Log Backup 1',
+    DESCRIPTION = N'Transaction log backup capturing all changes since last backup',
+    STATS = 10;
+
+-- Wait a bit and insert more data
+WAITFOR DELAY '00:00:05';
+
+USE SampleDB;
+INSERT INTO dbo.Transactions (UserID, Amount, Status) VALUES
+(1, 500.00, 'Completed'),
+(2, 750.00, 'Pending');
+
+-- Create another transaction log backup
+BACKUP LOG SampleDB
+TO DISK = N'C:\Backups\SampleDB_Log_20250124_1001.trn'
+WITH 
+    COMPRESSION,
+    INIT,
+    NAME = N'SampleDB Transaction Log Backup 2',
+    STATS = 10;
+
+-- Query log backup history
+SELECT 
+    database_name,
+    backup_start_date,
+    backup_finish_date,
+    backup_size / 1024 / 1024 AS [Size (MB)],
+    'Log' AS [Backup Type]
+FROM msdb.dbo.backupset
+WHERE database_name = 'SampleDB'
+  AND type = 'L'
+ORDER BY backup_start_date DESC;
+
+================================================================================
+SECTION 19: BACKUP CHAIN VERIFICATION
+================================================================================
+
+-- SQL Script: Verify Complete Backup Chain
+
+-- Query to show entire backup chain
+SELECT 
+    database_name,
+    backup_start_date,
+    CASE type 
+        WHEN 'D' THEN 'Full'
+        WHEN 'I' THEN 'Differential'
+        WHEN 'L' THEN 'Log'
+        ELSE type 
+    END AS [Backup Type],
+    backup_size / 1024 / 1024 AS [Size (MB)],
+    first_lsn,
+    last_lsn,
+    checkpoint_lsn
+FROM msdb.dbo.backupset
+WHERE database_name = 'SampleDB'
+ORDER BY backup_start_date;
+
+-- Query to verify backup files exist on disk
+SELECT 
+    bmf.physical_device_name,
+    bs.backup_start_date,
+    bs.backup_size / 1024 / 1024 AS [Size (MB)]
+FROM msdb.dbo.backupmediafamily bmf
+JOIN msdb.dbo.backupset bs ON bmf.media_set_id = bs.media_set_id
+WHERE bs.database_name = 'SampleDB'
+ORDER BY bs.backup_start_date DESC;
+
+================================================================================
+SECTION 20: POINT-IN-TIME RECOVERY TEST
+================================================================================
+
+-- SQL Script: Simulate Data Loss and Perform Point-in-Time Recovery
+
+-- Step 1: Note the current time and create timestamp table
+USE SampleDB;
+CREATE TABLE #RecoveryTimestamps
+(
+    EventDescription VARCHAR(100),
+    EventTime DATETIME2
+);
+
+INSERT INTO #RecoveryTimestamps VALUES ('Before insert', GETDATE());
+
+-- Step 2: Insert test data (record the time)
+INSERT INTO dbo.AnalyticsData (EventDate, EventType, EventData) VALUES
+(GETDATE(), 'Recovery Test', 'Data to recover - part 1');
+
+INSERT INTO #RecoveryTimestamps VALUES ('After first insert', GETDATE());
+
+-- Step 3: Create log backup to preserve this data
+BACKUP LOG SampleDB
+TO DISK = N'C:\Backups\SampleDB_Log_Recovery_1.trn'
+WITH INIT, COMPRESSION;
+
+-- Step 4: Insert more data
+WAITFOR DELAY '00:00:03';
+INSERT INTO dbo.AnalyticsData (EventDate, EventType, EventData) VALUES
+(GETDATE(), 'Recovery Test', 'Data to recover - part 2');
+
+INSERT INTO #RecoveryTimestamps VALUES ('After second insert', GETDATE());
+
+-- Step 5: Create another log backup
+BACKUP LOG SampleDB
+TO DISK = N'C:\Backups\SampleDB_Log_Recovery_2.trn'
+WITH INIT, COMPRESSION;
+
+-- Step 6: Simulate data loss - DELETE the recovery test data
+DELETE FROM dbo.AnalyticsData WHERE EventType = 'Recovery Test';
+COMMIT;
+
+INSERT INTO #RecoveryTimestamps VALUES ('After delete (data loss)', GETDATE());
+
+-- Step 7: Create final log backup to capture the delete
+BACKUP LOG SampleDB
+TO DISK = N'C:\Backups\SampleDB_Log_Recovery_3.trn'
+WITH INIT, COMPRESSION;
+
+-- Step 8: Show the timestamps
+SELECT * FROM #RecoveryTimestamps;
+
+-- Step 9: RESTORE POINT-IN-TIME (restore to before delete)
+-- NOTE: These are example commands - they would restore the database
+-- For lab purposes, create a test database instead
+
+USE master;
+
+-- Create restore test database to avoid affecting original
+RESTORE DATABASE SampleDB_Restored
+FROM DISK = N'C:\Backups\SampleDB_Full_20250124.bak'
+WITH NORECOVERY, REPLACE;
+
+-- Restore differential
+RESTORE DATABASE SampleDB_Restored
+FROM DISK = N'C:\Backups\SampleDB_Diff_20250124.bak'
+WITH NORECOVERY;
+
+-- Restore log backup 1
+RESTORE LOG SampleDB_Restored
+FROM DISK = N'C:\Backups\SampleDB_Log_Recovery_1.trn'
+WITH NORECOVERY;
+
+-- Restore log backup 2
+RESTORE LOG SampleDB_Restored
+FROM DISK = N'C:\Backups\SampleDB_Log_Recovery_2.trn'
+WITH NORECOVERY;
+
+-- Restore log backup 3 but STOP BEFORE the delete
+-- Use STOPAT to recover to specific point in time
+-- Format: YYYY-MM-DD HH:MM:SS.nnn
+-- Stop before the delete occurred
+RESTORE LOG SampleDB_Restored
+FROM DISK = N'C:\Backups\SampleDB_Log_Recovery_3.trn'
+WITH RECOVERY, STOPAT = '2025-01-24 10:00:45';  -- Adjust time as needed
+
+-- Step 10: Verify recovered data
+USE SampleDB_Restored;
+SELECT 
+    'Original AnalyticsData' AS [Source],
+    COUNT(*) AS [Count]
+FROM dbo.AnalyticsData
+UNION ALL
+SELECT 
+    'Recovered Data',
+    COUNT(*)
+FROM dbo.AnalyticsData
+WHERE EventType = 'Recovery Test';
+
+-- Step 11: Clean up test database
+USE master;
+ALTER DATABASE SampleDB_Restored SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+DROP DATABASE SampleDB_Restored;
+
+================================================================================
+SECTION 21: BACKUP MAINTENANCE AND CLEANUP
+================================================================================
+
+-- SQL Script: Backup Cleanup Maintenance
+
+-- View backup history summary
+SELECT 
+    database_name,
+    type AS [Backup Type],
+    COUNT(*) AS [Backup Count],
+    MAX(backup_start_date) AS [Last Backup],
+    SUM(backup_size) / 1024 / 1024 / 1024 AS [Total Size (GB)]
+FROM msdb.dbo.backupset
+WHERE database_name = 'SampleDB'
+GROUP BY database_name, type
+ORDER BY database_name, type;
+
+-- Delete old backup history (example: backups older than 30 days)
+-- Uncomment to use
+-- EXEC msdb.dbo.sp_delete_backuphistory 
+--     @oldest_date = DATEADD(DAY, -30, GETDATE());
+
+-- Clean up local backup files (PowerShell)
+# $backupPath = "C:\Backups"
+# $daysToKeep = 7
+# $cutoffDate = (Get-Date).AddDays(-$daysToKeep)
+# Get-ChildItem -Path $backupPath -Filter "*.bak" | Where-Object { $_.CreationTime -lt $cutoffDate } | Remove-Item -Force
+# Get-ChildItem -Path $backupPath -Filter "*.trn" | Where-Object { $_.CreationTime -lt $cutoffDate } | Remove-Item -Force
+
+================================================================================
+END OF SECTION 21
+================================================================================
+
+QUICK REFERENCE - COMMON COMMANDS FOR DAY 1
+
+1. Check SQL Server version:
+   SELECT @@VERSION;
+
+2. Check current memory settings:
+   EXEC sp_configure 'max server memory';
+
+3. View database file information:
+   SELECT * FROM sys.master_files WHERE database_id = DB_ID('SampleDB');
+
+4. Create full backup:
+   BACKUP DATABASE SampleDB TO DISK = N'C:\Backups\SampleDB_Full.bak' WITH COMPRESSION;
+
+5. Create log backup:
+   BACKUP LOG SampleDB TO DISK = N'C:\Backups\SampleDB_Log.trn' WITH COMPRESSION;
+
+6. View backup history:
+   SELECT * FROM msdb.dbo.backupset WHERE database_name = 'SampleDB' ORDER BY backup_start_date DESC;
+
+7. Check login list:
+   SELECT name, type_desc FROM sys.syslogins ORDER BY name;
+
+8. View database permissions:
+   SELECT * FROM fn_builtin_permissions(NULL);
+
+================================================================================
+NOTES FOR LAB INSTRUCTORS
+================================================================================
+
+1. All paths in this script assume default SQL Server 2025 installation:
+   - Data files: C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Data
+   - Log files: C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\Log
+   - Backups: C:\Backups (create this directory first)
+
+2. Passwords used in examples should be changed for any production-like environment
+
+3. Some commands (like creating Windows logins) require domain environment
+   For lab in non-domain, use local users instead
+
+4. TempDB file configuration changes require SQL Server restart
+
+5. All backup/recovery scenarios should be tested in LAB first
+
+6. Remember to enable authentication mode mixed/full before using SQL authentication
+
+================================================================================

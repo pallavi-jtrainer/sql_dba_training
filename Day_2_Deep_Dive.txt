@@ -1,0 +1,1218 @@
+================================================================================
+SQL SERVER 2025 DBA TRAINING - DAY 2 DEEP DIVE
+MONITORING, TROUBLESHOOTING & LOG ANALYSIS - TECHNICAL EXPLANATIONS
+================================================================================
+
+TABLE OF CONTENTS
+1. Performance Baseline Theory
+2. DMV Architecture and Usage
+3. Wait Statistics Deep Dive
+4. Blocking and Locking Mechanics
+5. Deadlock Anatomy
+6. Extended Events Architecture
+7. Troubleshooting Methodology
+8. Performance Monitoring Tools
+9. Incident Response and RCA
+
+================================================================================
+1. PERFORMANCE BASELINE THEORY
+================================================================================
+
+PURPOSE OF BASELINES:
+
+Baseline = documented normal system behavior under typical load
+
+Benefits:
+1. DEVIATION DETECTION: Identify when something changed
+2. TRENDING: Project future resource needs
+3. CAPACITY PLANNING: Know when to upgrade
+4. SLA MANAGEMENT: Demonstrate compliance/violations
+5. ANOMALY DETECTION: Quickly spot problems
+6. VALIDATION: Measure fix effectiveness
+
+TYPES OF BASELINES:
+
+Time-based:
+- Hourly: Typical hour under normal load
+- Daily: 24-hour pattern (peak vs off-peak)
+- Weekly: Weekly pattern (weekday vs weekend)
+- Monthly: Month-to-month trending
+- Yearly: Year-over-year comparison
+
+Condition-based:
+- Login baseline: User count at normal time
+- Workload baseline: Query count at normal time
+- Resource baseline: CPU/Memory/IO at normal time
+
+ESTABLISHING BASELINES:
+
+Step 1: Capture Period
+Duration: 1-2 weeks minimum
+Frequency: Every 5-15 minutes
+Conditions: Normal business operations
+
+Step 2: Data Collection
+Metrics: CPU, Memory, I/O, Database size, Connection count
+Tools: Perfmon, DMVs, Custom queries, Query Store
+
+Step 3: Analysis
+Identify patterns:
+- Peak times (morning ramp-up)
+- Off-peak times (nighttime low usage)
+- Anomalies (unusual spikes)
+- Trends (growing resource usage)
+
+Step 4: Documentation
+Record: Baseline values, measurement dates, conditions
+Use: Spreadsheet or database table for trending
+
+BASELINE METRICS BY CATEGORY:
+
+CPU Metrics:
+├─ % Processor Time: 40-60% (normal), 60-80% (elevated), >80% (crisis)
+├─ Batch Requests/sec: Varies by workload, track trend
+├─ SQL Compilations/sec: <100/sec healthy, >500/sec concerning
+└─ Context Switches/sec: Indicates CPU pressure
+
+Memory Metrics:
+├─ Total Server Memory: Usually 75-90% of max configured
+├─ Free Memory: >512 MB healthy, <256 MB concerning
+├─ Page Life Expectancy: >300 sec healthy, <100 sec crisis
+├─ Pages/sec (paging): <10/sec healthy, >20/sec concerning
+└─ Buffer Hit Ratio: >99% healthy, <95% concerning
+
+I/O Metrics:
+├─ Physical Reads/sec: Depends on workload
+├─ Physical Writes/sec: Depends on workload
+├─ Disk Queue Length: Should be < number of spindles
+├─ Avg Disk sec/Transfer: <10ms healthy, >30ms concerning
+└─ Logical Reads: Indicates data access pattern
+
+Database Metrics:
+├─ Database Size Growth: Track per week/month
+├─ Log Space Used: Should stay consistent (truncated after backup)
+├─ Table Growth: Identify growing tables
+└─ Index Fragmentation: Should be < 10%
+
+TRENDING AND PROJECTION:
+
+Linear regression for growth:
+If database grows 2 GB/week consistently:
+- Weeks to capacity = (Max Size - Current Size) / Growth Rate
+- Example: (500 GB max - 250 GB current) / 2 GB/week = 125 weeks
+
+Seasonal patterns:
+- Monthly reporting creates spike on specific date
+- Year-end closes create increased load
+- Summer slower than winter (vacation impact)
+
+Account for seasonality when projecting:
+- Use 3-month average, not last week
+- Identify recurring patterns
+- Plan capacity based on peak season
+
+ALERTING THRESHOLDS:
+
+Set alerts based on baseline + margin:
+
+CPU:
+├─ Warning: Baseline + 20%
+├─ Critical: Baseline + 40%
+└─ Check: If sustained > 5 minutes
+
+Memory:
+├─ Warning: Free < 1 GB
+├─ Critical: Free < 512 MB
+└─ Check: If sustained > 2 minutes
+
+I/O:
+├─ Warning: Queue > CPU count
+├─ Critical: Queue > CPU count * 2
+└─ Check: If sustained > 10 minutes
+
+Database Size:
+├─ Warning: 80% of max
+├─ Critical: 95% of max
+└─ Action: Plan growth/archive
+
+================================================================================
+2. DYNAMIC MANAGEMENT VIEW ARCHITECTURE
+================================================================================
+
+DMVs = Dynamic Management Views
+
+Function: Expose internal SQL Server state
+
+Advantages vs monitoring tools:
+✓ Real-time data
+✓ No licensing cost
+✓ Scriptable (can automate alerts)
+✓ Works on all editions
+✗ Requires SQL knowledge
+✗ Historical data not kept (real-time only)
+✗ No GUI visualization
+
+DMV HIERARCHY:
+
+sys.dm_exec_* (Execution related)
+├─ sys.dm_exec_sessions
+├─ sys.dm_exec_requests
+├─ sys.dm_exec_query_stats
+├─ sys.dm_exec_sql_text()
+├─ sys.dm_exec_query_plan()
+└─ sys.dm_exec_cached_plans
+
+sys.dm_os_* (Operating System related)
+├─ sys.dm_os_performance_counters
+├─ sys.dm_os_wait_stats
+├─ sys.dm_os_workers
+├─ sys.dm_os_memory_clerks
+├─ sys.dm_os_schedulers
+└─ sys.dm_os_spinlock_stats
+
+sys.dm_db_* (Database related)
+├─ sys.dm_db_index_usage_stats
+├─ sys.dm_db_index_operational_stats
+├─ sys.dm_db_missing_index_details
+├─ sys.dm_db_partition_stats
+└─ sys.dm_db_session_space_usage
+
+sys.dm_io_* (I/O related)
+├─ sys.dm_io_virtual_file_stats
+├─ sys.dm_io_pending_io_requests
+└─ sys.dm_io_cluster_shared_disk_stats
+
+COMMON QUERIES AND INTERPRETATIONS:
+
+1. sys.dm_exec_sessions
+   Function: List all connected sessions
+   Useful for: Finding user connections, monitoring connections, checking who's doing what
+   
+   Key columns:
+   - session_id: Session identifier (50+ = user sessions)
+   - login_name: Who is connected
+   - host_name: Where connected from
+   - database_id: Current database
+   - status: RUNNING, SLEEPING, RUNNABLE
+   - cpu_time: Total CPU used (in ticks, divide by 1000 for ms)
+   - memory_usage: Memory allocated (in pages, multiply by 8 for KB)
+   - last_request_start_time: When current request started
+   - last_request_end_time: When last request ended
+
+2. sys.dm_exec_requests
+   Function: Currently executing commands
+   Useful for: Finding slow queries, monitoring progress, identifying blockers
+   
+   Key columns:
+   - session_id: Which session
+   - status: RUNNING, SLEEPING, RUNNABLE, SUSPENDED
+   - command: What's being executed (SELECT, UPDATE, INSERT, etc.)
+   - sql_handle: Pointer to query text
+   - statement_start_offset: Character position of active statement
+   - cpu_time: CPU used so far
+   - total_elapsed_time: How long running
+   - reads/writes/logical_reads: I/O performed
+   - wait_type: What waiting for (if status = SUSPENDED)
+   - blocking_session_id: Session blocking this one (if > 0)
+
+3. sys.dm_exec_query_stats
+   Function: Query execution statistics from plan cache
+   Useful for: Finding expensive queries, performance regression detection
+   
+   Key columns:
+   - sql_handle: Unique query identifier
+   - plan_handle: Execution plan identifier
+   - execution_count: How many times executed
+   - total_elapsed_time: Sum of all execution times
+   - last_execution_time: When last run
+   - total_worker_time: Total CPU time
+   - total_logical_reads: Total data pages accessed
+   - total_physical_reads: Total disk reads
+   - min_elapsed_time: Fastest execution
+   - max_elapsed_time: Slowest execution
+
+   Interpretation:
+   - If avg_elapsed = total_elapsed / execution_count varies widely:
+     → Parameter sniffing (same query, different performance)
+     → Use RECOMPILE or OPTIMIZE FOR hint
+   
+   - If execution_count high, total_elapsed low:
+     → Lightweight queries, likely internal SQL Server operations
+   
+   - If execution_count = 1, total_elapsed high:
+     → Single heavy query (batch job, data migration)
+
+4. sys.dm_os_performance_counters
+   Function: Performance Monitor counter values
+   Useful for: Getting exact metric values, creating alerts, trending
+   
+   Key columns:
+   - object_name: Counter category (e.g., "SQL Server: Buffer Manager")
+   - counter_name: Specific counter
+   - instance_name: Instance of counter (e.g., "_Total" for all CPUs)
+   - cntr_value: Current value
+   - cntr_type: Type of counter (gauge, counter, rate)
+   - base_counter_name: For calculated counters
+
+   Common counters to monitor:
+   - % Processor Time (CPU usage)
+   - Batch Requests/sec (query throughput)
+   - Page Reads/sec (disk reads)
+   - Page Writes/sec (disk writes)
+   - Physical Reads/sec
+   - Physical Writes/sec
+   - Logical Reads/sec
+   - Free Memory (KB)
+   - Total Server Memory (KB)
+   - Page Life Expectancy (buffer pool health)
+
+5. sys.dm_os_wait_stats
+   Function: Accumulated wait statistics
+   Useful for: Identifying resource bottlenecks, diagnosing slowness
+   
+   Key columns:
+   - wait_type: What thread was waiting for
+   - waiting_tasks_count: How many waits
+   - wait_time_ms: Total time spent waiting
+   - max_wait_time_ms: Longest single wait
+   - signal_wait_time_ms: CPU ready time waiting in queue
+
+   Calculation:
+   Resource Wait = wait_time_ms - signal_wait_time_ms
+   CPU Ready Time = signal_wait_time_ms
+   
+   If signal_wait_time_ms > 50% of wait_time_ms:
+   → CPU is waiting in scheduler queue (CPU bottleneck)
+   
+   If resource wait > 90% of wait_time_ms:
+   → Waiting for resource (disk, memory, lock)
+
+6. sys.dm_db_index_usage_stats
+   Function: Index usage patterns
+   Useful for: Identifying unused/unused indexes, tuning indexes
+   
+   Key columns:
+   - object_id: Table identifier
+   - index_id: Index identifier (0=heap, 1=clustered, 2+=nonclustered)
+   - user_seeks: Index used in seek operation
+   - user_scans: Index used in scan operation
+   - user_lookups: Index used in lookup operation
+   - user_updates: Index updated (maintenance cost)
+   - last_user_seek: When last seek performed
+
+   Interpretation:
+   - If user_seeks = 0, user_scans = 0, user_lookups = 0:
+     → Unused index (candidate for drop)
+   
+   - If user_updates > (user_seeks + user_scans + user_lookups) * 10:
+     → High maintenance cost, consider dropping
+   
+   - If last_user_seek is NULL:
+     → Never used, safe to drop
+
+7. sys.dm_db_missing_index_details
+   Function: Identify missing indexes that would help
+   Useful for: Performance tuning, index design
+   
+   Key columns:
+   - equality_columns: Columns in WHERE clause
+   - inequality_columns: Columns in range predicates
+   - included_columns: Columns in SELECT (covering index)
+   - user_seeks: How many times would have helped
+   - avg_user_impact: Estimated performance improvement (0-1)
+   - index_handle: Reference to index
+
+   Improvement Measure = (user_seeks + user_scans + user_lookups) 
+                        * avg_total_user_cost 
+                        * avg_user_impact
+   
+   Higher value = more beneficial to create
+
+================================================================================
+3. WAIT STATISTICS DEEP DIVE
+================================================================================
+
+Wait Statistics = time SQL Server spent not executing queries
+
+Total SQL Server time = Execution time + Wait time + Idle time
+
+Wait statistics tell you WHAT the server was waiting for (not HOW LONG queries take).
+
+WAIT TYPE CATEGORIES:
+
+1. CPU-RELATED WAITS:
+
+CXPACKET (Parallel exchange packet wait)
+- Meaning: Parallel query threads waiting for each other
+- Normal occurrence: 20-30% of total waits (parallelism overhead)
+- Concerning: > 40% (too much parallelism)
+- Fix: Increase COST THRESHOLD FOR PARALLELISM
+  
+  Reason: Query plan has high parallelism cost
+  Example: Large table scans, huge aggregations
+  Solution: Raise cost threshold from 5 to 50+ so only expensive queries parallelize
+
+SOS_SCHEDULER_YIELD (CPU scheduler yield)
+- Meaning: Thread gave up CPU voluntarily
+- Normal: < 5% of total waits
+- Concerning: > 10% (CPU pressure)
+- Fix: Optimize queries, add CPU, or reduce workload
+
+LOGBUFFER (Log buffer I/O)
+- Meaning: Waiting for log buffer space
+- Cause: Disk can't keep up with log writes
+- Normal: < 1%
+- Fix: Faster disk for log, larger log buffer, batch transactions
+
+2. I/O-RELATED WAITS:
+
+IO_COMPLETION (General I/O completion)
+- Meaning: Waiting for disk I/O to complete
+- Normal: 10-20% for OLTP
+- Concerning: > 30% (disk bottleneck)
+- Subcategories:
+  * PageIOLatch_SH: Shared latch on data page (read I/O)
+  * PageIOLatch_EX: Exclusive latch on data page (write I/O)
+  * ReadFile: Reading from disk
+  * WriteFile: Writing to disk
+
+PAGEIOLATCH_SH (Page I/O latch - shared)
+- Meaning: Waiting to read page from disk
+- Normal: 5-10%
+- Concerning: > 15% (disk reads too high)
+- Fix: Add indexes (fewer reads), add RAM (more pages cached)
+
+PAGEIOLATCH_EX (Page I/O latch - exclusive)
+- Meaning: Waiting to write page to disk
+- Normal: 1-5%
+- Concerning: > 10% (disk writes too high)
+- Fix: Batch updates, optimize update queries
+
+3. MEMORY-RELATED WAITS:
+
+RESOURCE_SEMAPHORE (Memory grant semaphore)
+- Meaning: Waiting for memory to be granted for query execution
+- Normal: < 1%
+- Concerning: > 5% (memory pressure)
+- Example: Large sort or hash join can't get requested memory
+- Fix: Increase max server memory, optimize query to use less memory
+
+MEMORY_ALLOCATION_EXT (Extended memory allocation)
+- Meaning: Waiting for external memory allocation
+- Cause: Severe memory pressure
+- Fix: Add more RAM, reduce memory usage
+
+4. LOCKING-RELATED WAITS:
+
+LCK_M_* (Lock wait)
+- Meaning: Waiting to acquire lock
+- Multiple types:
+  * LCK_M_S: Waiting for shared lock
+  * LCK_M_X: Waiting for exclusive lock
+  * LCK_M_IX: Waiting for intent exclusive lock
+  
+- Normal: < 5%
+- Concerning: > 10% (blocking/contention)
+- Fix: Identify blocking query, optimize to use less locking time
+
+LOCK_HASH (Lock hash table bucket contention)
+- Meaning: Lock manager structure contention
+- Cause: Very high lock rate
+- Fix: Optimize transactions, use row versioning
+
+5. LATCHING-RELATED WAITS:
+
+PAGELATCHES_* (Page latch waits)
+- Meaning: Contention on buffer pool pages
+- Multiple types:
+  * PAGELATCH_SH: Shared latch wait
+  * PAGELATCH_EX: Exclusive latch wait
+  
+- Normal: 2-5%
+- Concerning: > 10% (buffer pool hot spots)
+- Example: PFS (Page Free Space) page contention
+- Fix: Add filegroups, reduce hot page contention
+
+LATCH_* (Other latch waits)
+- LATCH_EX: Waiting for exclusive latch
+- LATCH_SH: Waiting for shared latch
+- Usually < 1%, concerning if > 5%
+
+6. NETWORKING WAITS:
+
+ASYNC_NETWORK_IO (Asynchronous network I/O)
+- Meaning: Client slow to consume results
+- Cause: Network slow, client processing slow
+- Normal: 1-3%
+- Fix: Optimize network, client, or reduce result set
+
+NETWORK_IO (Synchronous network I/O)
+- Meaning: Synchronous network operation
+- Usually < 1%
+
+7. LOGGING WAITS:
+
+WRITELOG (Write to log)
+- Meaning: Writing transaction log to disk
+- Normal: 1-5%
+- Concerning: > 10% (disk can't keep up)
+- Fix: Faster disk, async I/O, larger log buffer
+
+LOG_RATE_GOVERNOR (Log rate governor)
+- Meaning: Transaction log rate limiting (during recovery)
+- Normal: 0 (only during recovery)
+- Fix: Let recovery complete, don't interrupt
+
+ANALYZING WAIT STATISTICS:
+
+Step 1: Calculate percentage distribution
+SELECT 
+    wait_type,
+    CAST(100.0 * wait_time_ms / SUM(wait_time_ms) OVER () AS NUMERIC(5,2)) AS [% of Total]
+FROM sys.dm_os_wait_stats
+WHERE wait_time_ms > 0
+
+Step 2: Identify top 3 wait types
+- Focus on top waiter
+- Understand what it means
+- Plan fix
+
+Step 3: Assess criticality
+- Is it expected for this workload?
+- Is it causing performance problems?
+- Do action based on impact
+
+Step 4: Monitor for change
+- Baseline wait profile
+- Watch for increases
+- Alert on significant changes
+
+Healthy Wait Profile Example:
+
+Workload: OLTP with moderate parallelism
+- CXPACKET: 25% (parallelism)
+- IO_COMPLETION: 15% (normal disk I/O)
+- Sleeping: 20% (idle connections)
+- PAGELATCHES_SH: 8% (normal page contention)
+- LCK_M_X: 5% (normal locking)
+- Others: 27%
+
+Problematic Wait Profile Example:
+
+- SOS_SCHEDULER_YIELD: 45% (CPU bottleneck!)
+- CXPACKET: 30% (too much parallelism)
+- LCK_M_X: 15% (blocking/contention!)
+- Others: 10%
+
+Actions:
+- Increase COST THRESHOLD to reduce parallelism
+- Add CPU or optimize queries
+- Identify and optimize blocking queries
+
+================================================================================
+4. BLOCKING AND LOCKING MECHANICS
+================================================================================
+
+LOCK HIERARCHY:
+
+Lock = Mutual exclusion on resource
+
+SQL Server Lock Types:
+
+Shared (S): Read lock
+- Multiple readers allowed simultaneously
+- Exclusive lock blocks shared lock
+- Example: SELECT statement
+
+Exclusive (X): Write lock
+- Only one exclusive lock allowed
+- Blocks all other locks (shared and exclusive)
+- Example: UPDATE, INSERT, DELETE
+
+Intent Locks (IX, IS, etc.): Intent to acquire locks
+- Parent lock indicating child locks present
+- Table IS lock: Table has shared locks on rows
+- Table IX lock: Table has exclusive locks on rows
+- Prevent incompatible higher-level locks
+
+Update (U): Conversion lock
+- Used when UPDATE might escalate to exclusive
+- Prevents deadlock during upgrade
+- UPDATE statement uses U lock first, then X
+
+Blocking Scenario:
+
+Process A: SELECT * FROM Table1 WITH (NOLOCK)  → Shared lock on Table1
+Process B: UPDATE Table1 SET Col1 = 1          → Tries Exclusive lock
+           (BLOCKED by Process A's shared lock)
+           
+Waiting Queue: Process B waits for Process A to release shared lock
+
+Resolution: Process A finishes SELECT, releases shared lock
+           Process B acquires exclusive lock, performs UPDATE
+
+LOCK MODES:
+
+Database-level locks:
+- Database lock: Entire database
+
+Table-level locks:
+- Table lock: Entire table
+- Shared (S): Multiple readers
+- Exclusive (X): Single writer
+- Intent (IS/IX): Intent to lock rows
+
+Row-level locks:
+- Row lock: Single row
+- Shared (S): Read lock on row
+- Exclusive (X): Write lock on row
+- Most granular, best concurrency
+
+Page-level locks:
+- Page lock: 8 KB page
+- Between table and row locks
+- Rare in SQL Server 2025
+
+Key-range locks:
+- Range of values in index
+- Ensures serialization
+- Used with isolation levels
+
+LOCK ESCALATION:
+
+SQL Server can escalate locks to higher granularity:
+
+Example:
+- Query acquires 1000 row locks
+- SQL Server: "This is expensive, escalate to table lock"
+- Escalation: Rows → Table
+- Benefit: Less memory, less overhead
+- Downside: Lower concurrency
+
+Escalation triggers:
+- 5000+ locks on single partition
+- Memory pressure
+- Configuration (LOCK_ESCALATION)
+
+Can disable escalation:
+ALTER TABLE TableName SET (LOCK_ESCALATION = DISABLE);
+
+BLOCKING DETECTION:
+
+sys.dm_exec_requests shows:
+- blocking_session_id: Who's blocking me
+- wait_type: What I'm waiting for (usually LCK_*)
+
+Blocking chain:
+Session A → blocks → Session B → blocks → Session C
+
+To resolve:
+1. Identify blocking session (A)
+2. Understand what it's doing
+3. Option 1: Wait for A to complete
+4. Option 2: Kill A (if safe)
+5. Option 3: Optimize A (if slow)
+
+IMPACT ASSESSMENT:
+
+Blocking severity:
+
+Blocking 1 session: Low impact
+Blocking 5 sessions: Medium impact
+Blocking 10+ sessions: High impact
+Blocking user-facing query: Very high impact
+Blocking application critical path: Crisis
+
+Action:
+- Low: Monitor, optimize if pattern repeats
+- Medium: Investigate, optimize blocking query
+- High: Kill if necessary, optimize immediately
+- Critical: Kill if necessary, emergency fix needed
+
+================================================================================
+5. DEADLOCK ANATOMY
+================================================================================
+
+DEADLOCK DEFINITION:
+
+Two or more processes wait for resources held by each other, creating circular dependency.
+
+Process A: Has Lock X → Wants Lock Y (held by B)
+Process B: Has Lock Y → Wants Lock X (held by A)
+
+Result: Neither can proceed → DEADLOCK!
+
+SQL Server detects deadlock, kills one victim to break cycle.
+
+DEADLOCK VICTIM SELECTION:
+
+SQL Server kills process consuming least resources:
+
+Factors (in order):
+1. Process with least CPU time
+2. Process with least I/O
+3. Process with least memory
+4. Process with lowest DOP (degree of parallelism)
+5. Random if tied
+
+Goal: Minimize transaction rollback cost
+
+COMMON DEADLOCK PATTERNS:
+
+Pattern 1: Circular Lock Dependency
+
+Process A:
+  BEGIN TRAN
+  UPDATE Table1 SET Col1 = 1 WHERE ID = 1  -- Lock acquired on Table1
+  -- Some delay
+  UPDATE Table2 SET Col1 = 1 WHERE ID = 1  -- DEADLOCK! Table2 locked by B
+
+Process B:
+  BEGIN TRAN
+  UPDATE Table2 SET Col1 = 1 WHERE ID = 1  -- Lock acquired on Table2
+  -- Some delay
+  UPDATE Table1 SET Col1 = 1 WHERE ID = 1  -- DEADLOCK! Table1 locked by A
+
+Solution:
+- Establish consistent lock order
+- Always update Table1 before Table2
+- Or use serializable isolation level carefully
+
+Pattern 2: Hot Row Contention
+
+Process A: UPDATE Table1 SET Col1 = A WHERE ID = 1
+Process B: UPDATE Table1 SET Col1 = B WHERE ID = 1
+Process C: UPDATE Table1 SET Col1 = C WHERE ID = 1
+...
+
+Under concurrent update stress:
+- Lock escalation to table lock
+- Table lock causes high contention
+- Potential deadlock on escalation
+
+Solution:
+- Use row versioning (READ_COMMITTED_SNAPSHOT)
+- Disable lock escalation
+- Add clustered index on ID
+- Avoid hot rows if possible
+
+Pattern 3: Implicit Cursor Deadlock
+
+Cursor A:
+  WHILE @Loop = 1
+    FETCH FROM Cursor1
+    UPDATE Table1 WHERE CURRENT OF Cursor1
+
+Cursor B:
+  WHILE @Loop = 1
+    FETCH FROM Cursor2
+    UPDATE Table1 WHERE CURRENT OF Cursor2
+
+Problem:
+- Different fetch order leads to different lock order
+- Deadlock when accessing same rows differently
+
+Solution:
+- Use set-based operations instead of cursor
+- Order cursor by primary key
+- Use consistent locking approach
+
+DEADLOCK DETECTION:
+
+Enable trace flag 1222 to log detailed deadlock info:
+DBCC TRACEON (1222, -1);
+
+Deadlock information appears in SQL Server Error Log:
+- Which processes involved
+- Which locks they had
+- Which locks they wanted
+- SQL statements
+- Deadlock graph (XML showing circular dependency)
+
+Or use Extended Events:
+CREATE EVENT SESSION [Deadlock] ON SERVER
+ADD EVENT sqlserver.database_xml_deadlock_report
+...
+
+DEADLOCK RESOLUTION:
+
+Temporary fix (per occurrence):
+- Catch deadlock error in application
+- Retry transaction
+- Retry usually succeeds after victim dies
+
+Permanent fix:
+- Change application logic (lock order)
+- Optimize queries (faster execution)
+- Add indexes (reduce locks held)
+- Use appropriate isolation level
+- Disable lock escalation if applicable
+- Use row versioning (snapshot isolation)
+
+Retry Logic (Application Code Example):
+```
+DECLARE @RetryCount = 0;
+DECLARE @MaxRetries = 3;
+
+WHILE @RetryCount < @MaxRetries
+BEGIN
+  BEGIN TRY
+    BEGIN TRANSACTION
+      -- Application code
+      UPDATE Table1 ...
+      UPDATE Table2 ...
+    COMMIT TRANSACTION
+    BREAK  -- Success, exit loop
+  END TRY
+  BEGIN CATCH
+    ROLLBACK TRANSACTION
+    IF ERROR_NUMBER() = 1205  -- Deadlock error number
+      SET @RetryCount = @RetryCount + 1
+    ELSE
+      THROW
+  END CATCH
+END
+```
+
+================================================================================
+6. EXTENDED EVENTS ARCHITECTURE
+================================================================================
+
+EXTENDED EVENTS (XEvents):
+
+SQL Server's event tracing infrastructure
+
+Concept: 
+- Publish events when things happen
+- Subscribe to events of interest
+- Capture and analyze
+
+Benefits over old-style tracing:
+✓ Lightweight (low overhead)
+✓ Flexible event selection
+✓ Multiple targets (file, buffer, ETW)
+✓ Built-in filtering
+✓ Correlate with system events
+
+EVENT ARCHITECTURE:
+
+Event = Something that happened in SQL Server
+
+Examples:
+- sqlserver.sql_statement_completed: Query finished
+- sqlserver.error_reported: Error occurred
+- sqlserver.locks_deadlock_chain: Deadlock detected
+- sqlserver.database_xml_deadlock_report: Detailed deadlock info
+
+ACTION = Additional data to capture when event fires
+
+Examples:
+- sqlserver.session_id: Current session ID
+- sqlserver.database_id: Current database
+- sqlserver.login_name: User name
+- sqlserver.client_hostname: Client computer name
+- sqlserver.sql_text: SQL statement being executed
+
+TARGET = Where to send event data
+
+Examples:
+- package0.event_file: Write to disk file (persistent)
+- package0.ring_buffer: Keep in memory buffer (lost on restart)
+- package0.etw_classic_sync: Windows Event Tracing
+
+XEVENT SESSION CREATION:
+
+Syntax:
+CREATE EVENT SESSION [SessionName] ON SERVER
+ADD EVENT [event_name]
+  (
+    ACTION (action1, action2, ...)
+    WHERE event_filter_condition
+  )
+ADD TARGET [target_name]
+  (SET parameter = value, ...)
+WITH (MAX_MEMORY = 4MB, ...)
+
+Example: Capture slow queries over 1 second
+
+CREATE EVENT SESSION [SlowQueries] ON SERVER
+ADD EVENT sqlserver.sql_statement_completed
+  (
+    ACTION 
+    (
+      sqlserver.session_id,
+      sqlserver.database_id,
+      sqlserver.login_name
+    )
+    WHERE duration > 1000000  -- 1 sec in microseconds
+  )
+ADD TARGET package0.event_file
+  (SET filename = N'C:\XEvents\SlowQueries.xel')
+WITH (MAX_MEMORY = 4MB, STARTUP_STATE = ON);
+
+QUERYING XEVENT DATA:
+
+Use sys.fn_xe_file_target_read_file() to read event files:
+
+SELECT CAST(event_data AS XML) AS event_xml
+FROM sys.fn_xe_file_target_read_file
+(
+  N'C:\XEvents\SlowQueries*.xel',
+  N'C:\XEvents\SlowQueries*.xem',
+  NULL,
+  NULL
+)
+
+Parse XML to extract fields:
+- event/@timestamp: When event occurred
+- event/@name: Event type
+- event/action[@name='session_id']/value: Session ID
+- event/data[@name='duration']/value: Duration
+
+================================================================================
+7. TROUBLESHOOTING METHODOLOGY
+================================================================================
+
+STRUCTURED TROUBLESHOOTING:
+
+Phase 1: SYMPTOMS GATHERING (5 minutes)
+┌─ When did problem start?
+├─ Is it ongoing or intermittent?
+├─ Who is affected? (1 user, group, or all?)
+├─ What exactly is slow? (Query, report, application?)
+└─ How severe? (1% slower or 50% slower?)
+
+Information sources:
+- Talk to user (when did you notice?)
+- Check logs for errors
+- Check recent changes
+- Ask if worked before (when did it break?)
+
+Phase 2: IMPACT ASSESSMENT (2 minutes)
+┌─ Business impact level
+├─ SLA implications
+├─ Revenue impact
+├─ How many users affected
+└─ How long can we tolerate this?
+
+Decision: 
+- Low impact → Investigate and fix, no rush
+- High impact → Implement workaround immediately, fix later
+
+Workaround options:
+- Kill blocking session
+- Restart service
+- Scale out (add server)
+- Run on different schedule
+
+Phase 3: EVIDENCE COLLECTION (10-15 minutes)
+Capture RIGHT NOW (before fixing):
+- sys.dm_exec_requests: Running queries
+- sys.dm_os_wait_stats: Wait statistics
+- sys.dm_exec_sessions: Session info
+- Query Store data: Top queries
+- Perfmon: CPU, Memory, I/O
+- Error logs: Any errors
+- Extended Events: Captured events
+
+Store in database for later analysis:
+CREATE TABLE CrisisSnapshot (
+  CaptureTime DATETIME2 DEFAULT GETDATE(),
+  MetricType VARCHAR(100),
+  MetricData VARCHAR(MAX)
+);
+
+Never overwrite this data before analysis!
+
+Phase 4: PROBLEM ISOLATION (10-30 minutes)
+
+Decision Tree:
+
+Is it ONE query or MANY queries?
+├─ ONE query
+│  ├─ Get query text
+│  ├─ Get execution plan
+│  ├─ Analysis:
+│  │  ├─ Is plan scanning entire table?
+│  │  ├─ Are statistics outdated?
+│  │  ├─ Is it parameter sniffing?
+│  │  └─ Is it lock wait or blocking?
+│  └─ Try: CREATE INDEX, UPDATE STATISTICS, RECOMPILE
+│
+└─ MANY queries
+   ├─ System bottleneck (CPU/Memory/I/O)?
+   │  ├─ High CPU? → Find CPU-consuming query, optimize
+   │  ├─ Low memory? → Increase max server memory, reduce usage
+   │  └─ High I/O? → Add indexes, optimize queries
+   │
+   └─ Workload pattern?
+      ├─ Many small queries → Recompilation overhead?
+      ├─ Few large queries → Query optimization needed?
+      └─ Parallel queries → Increase COST THRESHOLD
+
+Phase 5: ROOT CAUSE IDENTIFICATION
+
+Use evidence to pinpoint cause:
+
+Wait statistics guide:
+- CXPACKET > 40% → Too much parallelism
+- IO_COMPLETION > 30% → Disk bottleneck
+- LCK_M_* > 10% → Blocking/locking
+- SOS_SCHEDULER_YIELD > 10% → CPU pressure
+
+Query plan analysis:
+- Table Scan → Missing index
+- Many rows → Wrong join type
+- Hash spill → Increase memory, reduce rows
+- High memory grant → Reduce parallelism
+
+Performance counters:
+- Free memory < 512 MB → Memory pressure
+- CPU > 80% → CPU pressure
+- Disk queue > CPU count → Disk pressure
+- Page life expectancy < 100 → Memory pressure
+
+Phase 6: REMEDIATION (varies)
+
+Fix options (in risk order, lowest to highest):
+
+1. Configuration change (lowest risk)
+   - Increase COST THRESHOLD (no query changes)
+   - Increase max server memory (if available)
+   - Restart service (if necessary)
+
+2. Statistics update (low risk)
+   - UPDATE STATISTICS TableName
+   - No query changes
+   - Immediate effect
+
+3. Query recompile (low risk)
+   - DBCC FREEPROCCACHE
+   - Add RECOMPILE hint to query
+   - Forces new plan generation
+
+4. Add index (low-medium risk)
+   - Create recommended index
+   - Monitor for write overhead
+   - Can always drop if problematic
+
+5. Query rewrite (medium risk)
+   - Change application code
+   - Requires testing
+   - Must deploy carefully
+
+6. Kill blocking session (high risk)
+   - Terminates user's transaction
+   - User loses work
+   - Only if absolutely necessary
+
+Implementation approach:
+- Fix in TEST environment first
+- Verify effectiveness
+- Plan rollback
+- Implement in PROD during maintenance window
+- Monitor after fix
+
+Phase 7: VALIDATION (5 minutes)
+
+Verify fix worked:
+- Performance metric improved?
+- No regressions?
+- Correct query is now faster?
+- System stable?
+
+Metrics to check:
+- CPU: Back to baseline?
+- Memory: Not excessive?
+- Query time: 2 sec → < 1 sec?
+- User feedback: Problem resolved?
+
+Phase 8: ROOT CAUSE ANALYSIS (30 minutes)
+
+Write incident report:
+- What happened?
+- Why did it happen?
+- How was it fixed?
+- How to prevent recurrence?
+- What monitoring added?
+
+Example:
+"Query sp_GetCustomerOrders took 30 seconds instead of normal 2 seconds.
+Cause: Statistics on Customer table hadn't been updated in 90 days.
+When table grew from 100K to 900K rows, estimate was still 100K.
+Optimizer chose bad plan.
+Fix: Ran UPDATE STATISTICS.
+Prevention: Added automatic statistics update job, runs daily.
+Monitoring: Added alert if page life expectancy drops below 250 seconds."
+
+================================================================================
+8. INCIDENT RESPONSE AND RCA
+================================================================================
+
+INCIDENT RESPONSE PROCESS:
+
+Severity Levels:
+
+Critical (SEV 1):
+- Database down
+- All users unable to work
+- Revenue impact > $1M/hour
+- Response time: < 15 minutes
+
+High (SEV 2):
+- Database slow
+- Group of users impacted
+- Revenue impact moderate
+- Response time: < 1 hour
+
+Medium (SEV 3):
+- Single user or minor slowness
+- Workaround available
+- Minimal revenue impact
+- Response time: 4 hours
+
+Low (SEV 4):
+- Cosmetic issues
+- No user impact
+- Can wait for next maintenance
+- Response time: 1-2 weeks
+
+RESPONSE PLAYBOOK:
+
+For SEV 1 (Database Down):
+1. Page on-call DBA (immediately)
+2. Conference bridge with DBA, storage team, app team
+3. Collect evidence: Error logs, recent changes
+4. Quick diagnosis: Running? Disk full? Corruption?
+5. Emergency fix: Restart, remove blockage, restore
+6. Verify: Can users connect? Run critical queries?
+7. Root cause can wait (after business restored)
+8. Post-incident review within 24 hours
+
+For SEV 2 (Database Slow):
+1. Alert on-call DBA
+2. Collect evidence (DMVs, wait stats, plans)
+3. Identify bottleneck (CPU/Memory/I/O/Locking)
+4. Check for recent changes (deployment, data load)
+5. Implement temporary fix (kill query, configuration change)
+6. Permanent fix (code change, index, config)
+7. Monitor for 24 hours for recurrence
+8. Document lesson learned
+
+ROOT CAUSE ANALYSIS (RCA):
+
+Purpose: Understand why problem occurred, prevent recurrence
+
+Steps:
+
+1. DATA COLLECTION (completed during response)
+   - Evidence still available
+   - Timelines documented
+   - Affected queries identified
+
+2. TIMELINE RECONSTRUCTION
+   - 2:15 PM: Users report slowness
+   - 2:16 PM: DBA checks server, sees high CPU
+   - 2:20 PM: Identifies query consuming 80% CPU
+   - 2:25 PM: Finds missing index
+   - 2:30 PM: Creates index, performance improves
+
+3. ROOT CAUSE IDENTIFICATION
+   - Immediate cause: Missing index
+   - Why wasn't index there?
+     * Index was dropped 1 week ago (why?)
+     * Code change deployed 5 days ago
+     * New query in deployment needs index
+     * No index review in deployment process
+   - Underlying issue: Process gap
+     * Performance review missing before deploy
+     * Index recommendations not reviewed
+
+4. CORRECTIVE ACTIONS
+
+   Immediate (prevent this exact recurrence):
+   - Recreate missing index
+   - Monitor index usage
+
+   Short-term (prevent similar issues):
+   - Add index review to deployment process
+   - Create performance regression tests
+   - Implement pre-deployment query plan analysis
+
+   Long-term (strengthen system):
+   - Auto-scaling indexes based on workload
+   - Query performance alerts
+   - Automated index recommendation
+
+5. PREVENTIVE MEASURES
+
+   Monitoring:
+   - Alert if page life expectancy drops
+   - Alert if queries slow by > 50%
+   - Alert if CPU usage > 80% for > 5 minutes
+
+   Process:
+   - Every deployment: Run queries in staging
+   - Every deployment: Check execution plans
+   - Every deployment: Load test similar to production
+
+   Documentation:
+   - Runbook for "Database Slow" procedure
+   - Known issue list (hotspots, workarounds)
+   - Performance baseline documentation
+
+6. IMPLEMENTATION AND FOLLOW-UP
+
+   Assign owners:
+   - DBA: Monitor alerts for 2 weeks
+   - Dev: Add performance tests to CI/CD
+   - DevOps: Add query performance checks to deploy
+
+   Verify effectiveness:
+   - Same issue doesn't recur
+   - No new problems introduced
+   - Process improvements working
+
+================================================================================
+END OF DAY 2 DEEP DIVE
+================================================================================
+
+KEY TAKEAWAYS:
+
+1. Baselines enable anomaly detection
+2. DMVs provide detailed performance visibility
+3. Wait statistics identify bottlenecks
+4. Blocking detection requires investigation
+5. Deadlocks need lock ordering fixes
+6. Extended Events capture detailed event data
+7. Systematic troubleshooting finds root causes
+8. RCA prevents recurrence
+
+BEST PRACTICES:
+
+✓ Establish performance baselines immediately
+✓ Monitor wait statistics daily
+✓ Check for blocking proactively
+✓ Test index changes before production
+✓ Implement incident response process
+✓ Document all incident RCAs
+✓ Use Extended Events for detailed tracing
+✓ Automate performance monitoring
+
+TOOLS TO MASTER:
+
+- sys.dm_exec_query_stats: Top queries
+- sys.dm_os_wait_stats: Resource bottlenecks
+- sys.dm_exec_requests: Currently running
+- Query Store: Query history and regressions
+- Extended Events: Detailed event capture
+- Performance Monitor: System-level metrics
+
+NEXT STEPS (DAY 3):
+
+- Query optimization techniques
+- Index design and tuning
+- Maintenance automation
+- Performance regression prevention
+
+================================================================================
